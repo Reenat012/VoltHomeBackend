@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: volthome-api
+    env_file: .env
+    ports:
+      - "8080:3000"   # внешний:внутренний
+    restart: unless-stopped
+    # при желании можно включить логирование по умолчанию:
+    # logging:
+    #   driver: "json-file"
+    #   options:
+    #     max-size: "10m"
+    #     max-file: "3"
