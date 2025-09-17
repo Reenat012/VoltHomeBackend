@@ -4,7 +4,6 @@ import dotenv from "dotenv";
 import cors from "cors";
 import morgan from "morgan";
 
-// ВАЖНО: путь из server/ к соседним папкам
 import authRoutes from "../routes/auth.js";
 import { authMiddleware } from "../utils/jwt.js";
 
@@ -12,13 +11,13 @@ dotenv.config();
 
 const app = express();
 
-// Если сервер будет стоять за прокси/балансировщиком (Timeweb, Nginx)
+// Если сервер за прокси/балансировщиком (Timeweb, Nginx)
 app.set("trust proxy", 1);
 
-// ---- Middleware
+// Body parser
 app.use(express.json());
 
-// CORS
+// CORS (используем Bearer, cookie не нужны)
 const corsOrigins =
     process.env.CORS_ORIGINS === "*"
         ? "*"
@@ -30,40 +29,39 @@ const corsOrigins =
 app.use(
     cors({
         origin: corsOrigins === "*" ? true : corsOrigins,
-        credentials: true,
+        credentials: false
     })
 );
 
 // Логи HTTP-запросов
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
-// ---- Health & ping
+// Health & ping
 app.get("/", (_req, res) => res.json({ ok: true, service: "VoltHome API" }));
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// ---- Auth API (/auth/*)
+// Auth API
 app.use("/auth", authRoutes);
 
-// ---- Профиль (защищённый): GET /profile/me
+// Профиль (защищённый)
 app.get("/profile/me", authMiddleware, (req, res) => {
-    // uid приходит из проверенного JWT (authMiddleware)
     const uid = req.user?.uid || "demo-uid";
     res.json({
         displayName: "Volt User",
         email: "user@example.com",
         avatarUrl: null,
-        plan: "free", // позже переключим на "pro" по серверной логике
+        plan: "free",
         planUntilEpochSeconds: null,
-        uid,
+        uid
     });
 });
 
-// ---- 404
+// 404
 app.use((req, res) => {
     res.status(404).json({ error: "Not Found", path: req.originalUrl });
 });
 
-// ---- Start
+// Start
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 3000);
 

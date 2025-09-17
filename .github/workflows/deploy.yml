@@ -1,0 +1,37 @@
+name: Deploy to Timeweb
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.SERVER_PATH }}
+            echo "-> git pull"
+            git pull --rebase
+
+            echo "-> npm ci (prod only)"
+            npm ci --omit=dev
+
+            echo "-> restart PM2 app"
+            pm2 reload volthome-api || pm2 start server/server.js --name volthome-api
+            pm2 save
+
+            echo "-> health check"
+            curl -fsS http://127.0.0.1:3000/health && echo "OK"

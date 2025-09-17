@@ -1,3 +1,4 @@
+// utils/jwt.js
 import jwt from "jsonwebtoken";
 
 const SECRET = process.env.SESSION_JWT_SECRET || "change-me";
@@ -11,6 +12,11 @@ export function signToken(payload) {
 /** Проверить JWT и вернуть payload (или кинуть исключение) */
 export function verifyToken(token) {
     return jwt.verify(token, SECRET);
+}
+
+/** Проверить JWT, игнорируя истечение (нужно только для refresh-ручки) */
+export function verifyTokenAllowExpired(token) {
+    return jwt.verify(token, SECRET, { ignoreExpiration: true });
 }
 
 /** Express-middleware: требует валидный Bearer <JWT> */
