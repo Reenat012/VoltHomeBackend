@@ -23,33 +23,45 @@ jobs:
           script_stop: true
           script: |
             set -euo pipefail
-
             SERVER_PATH="${{ secrets.SERVER_PATH }}"   # /var/www/VoltHomeBackend
+            
             echo "[1/6] goto $SERVER_PATH"
             cd "$SERVER_PATH"
-
+            
             echo "[2/6] git fetch & hard reset to origin/main"
             git fetch --all --prune
             git reset --hard origin/main
-
+            
             echo "[3/6] install deps (production only)"
             npm ci --omit=dev
-
+            
             echo "[4/6] pm2 start/reload (absolute path + PM2_HOME)"
-            export PM2_HOME=/home/deploy/.pm2
-            # на всякий случай добавим /usr/bin в PATH
+            export PM2_HOME=/home/${{ secrets.SERVER_USER }}/.pm2
             export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-
-            # если процесса нет — стартуем; если есть — мягко перегружаем
+            
             if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
               /usr/bin/pm2 reload volthome-api
             else
               /usr/bin/pm2 start server/server.js --name volthome-api
             fi
-
             /usr/bin/pm2 save
-
-            echo "[5/6] healthcheck"
-            curl -fsS http://127.0.0.1:3000/health >/dev/null
-
+            
+            echo "[5/6] healthcheck with retry"
+            for i in {1..30}; do
+              if curl -fsS http://127.0.0.1:3000/health >/dev/null; then
+                echo "health OK on try $i ✅"
+                break
+              fi
+              echo "waiting app to become healthy... ($i/30)"
+              sleep 1
+            done
+            
+            # если после 30 попыток все еще нет /health — показать логи и упасть
+            if ! curl -fsS http://127.0.0.1:3000/health >/dev/null; then
+              echo "healthcheck failed, printing pm2 status/logs ⬇️"
+              /usr/bin/pm2 ls || true
+              /usr/bin/pm2 logs --lines 100 || true
+              exit 1
+            fi
+            
             echo "[6/6] done ✅"
