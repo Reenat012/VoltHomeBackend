@@ -1,6 +1,7 @@
 # VoltHome Backend (Node.js)
 
 Минимальный API для мобильного приложения:
+
 - `/health` — проверка
 - `/auth/yandex/exchange` — мок обмена на серверную сессию (вернет sessionJwt)
 - `/auth/session/refresh` — мок-рефреш
