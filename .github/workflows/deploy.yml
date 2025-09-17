@@ -15,17 +15,16 @@ jobs:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SERVER_HOST }}         # 147.45.185.209
+          username: ${{ secrets.SERVER_USER }}     # deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}      # приватный ключ (без пароля)
           port: 22
           envs: SERVER_PATH
           script_stop: true
           script: |
             set -euo pipefail
 
-            SERVER_PATH="${{ secrets.SERVER_PATH }}"
-
+            SERVER_PATH="${{ secrets.SERVER_PATH }}"   # /var/www/VoltHomeBackend
             echo "[1/6] goto $SERVER_PATH"
             cd "$SERVER_PATH"
 
@@ -36,12 +35,19 @@ jobs:
             echo "[3/6] install deps (production only)"
             npm ci --omit=dev
 
-            echo "[4/6] pm2 start/reload"
-            if ! pm2 describe volthome-api >/dev/null 2>&1; then
-              pm2 start server/server.js --name volthome-api
+            echo "[4/6] pm2 start/reload (absolute path + PM2_HOME)"
+            export PM2_HOME=/home/deploy/.pm2
+            # на всякий случай добавим /usr/bin в PATH
+            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+            # если процесса нет — стартуем; если есть — мягко перегружаем
+            if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
+              /usr/bin/pm2 reload volthome-api
             else
-              pm2 reload volthome-api
+              /usr/bin/pm2 start server/server.js --name volthome-api
             fi
+
+            /usr/bin/pm2 save
 
             echo "[5/6] healthcheck"
             curl -fsS http://127.0.0.1:3000/health >/dev/null
