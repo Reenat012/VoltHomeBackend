@@ -2,36 +2,55 @@ name: Deploy to Timeweb
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout (optional)
+      - name: Checkout (repo for context)
         uses: actions/checkout@v4
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SERVER_HOST }}         # напр. 147.45.185.209
+          username: ${{ secrets.SERVER_USER }}     # deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}      # приватный ключ (без лишних переносов)
           port: 22
           script_stop: true
+          envs: SERVER_PATH
           script: |
-            set -e
-            cd ${{ secrets.SERVER_PATH }}
-            echo "-> git pull"
-            git pull --rebase
+            set -euo pipefail
 
-            echo "-> npm ci (prod only)"
+            SERVER_PATH="${{ secrets.SERVER_PATH }}"   # напр. /var/www/VoltHomeBackend
+
+            echo "[1/6] goto $SERVER_PATH"
+            cd "$SERVER_PATH"
+
+            echo "[2/6] git fetch & hard reset to origin/main"
+            git fetch --all --prune
+            git reset --hard origin/main
+
+            echo "[3/6] install deps (production only)"
             npm ci --omit=dev
 
-            echo "-> restart PM2 app"
-            pm2 reload volthome-api || pm2 start server/server.js --name volthome-api
+            echo "[4/6] pm2 start/reload"
+            if ! pm2 describe volthome-api >/dev/null 2>&1; then
+              pm2 start server/server.js --name volthome-api
+            else
+              pm2 reload volthome-api --update-env
+            fi
             pm2 save
 
-            echo "-> health check"
-            curl -fsS http://127.0.0.1:3000/health && echo "OK"
+            echo "[5/6] healthcheck"
+            curl -fsS http://127.0.0.1:3000/health
+
+            echo "[6/6] done ✅"
