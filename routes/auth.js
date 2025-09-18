@@ -62,7 +62,8 @@ router.post("/session/refresh", (req, res) => {
     const m = /^Bearer (.+)$/.exec(auth);
     if (m) {
         try {
-            const payload = verifyTokenAllowExpired(m[1]); // читаем uid даже из истёкшего токена
+            // читаем uid даже из истёкшего токена
+            const payload = verifyTokenAllowExpired(m[1]);
             const uid = payload?.uid || "unknown";
             const session = issueSession(uid);
             return res.json(session);
@@ -85,6 +86,7 @@ router.post("/session/refresh", (req, res) => {
  * POST /auth/session/logout
  * body: { refreshId?: string }
  * Требует валидный Bearer.
+ * Возвращает: 200 { ok: true }
  */
 router.post("/session/logout", authMiddleware, (req, res) => {
     const { refreshId } = req.body || {};
@@ -92,7 +94,7 @@ router.post("/session/logout", authMiddleware, (req, res) => {
         const prev = refreshStore.get(refreshId);
         refreshStore.set(refreshId, { ...prev, valid: false });
     }
-    res.status(204).end();
+    res.json({ ok: true });
 });
 
 /**

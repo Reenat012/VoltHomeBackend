@@ -14,8 +14,20 @@ const app = express();
 // Если сервер за прокси/балансировщиком (Timeweb, Nginx)
 app.set("trust proxy", 1);
 
+/**
+ * Жёстко требуем application/json у всех небезопасных методов.
+ * Это помогает избежать text/plain и HTML-редиректов, которые ломают мобильный клиент.
+ */
+app.use((req, res, next) => {
+    const ct = req.get("content-type");
+    if (req.method !== "GET" && ct && !ct.startsWith("application/json")) {
+        return res.status(415).json({ error: "unsupported_media_type" });
+    }
+    next();
+});
+
 // Body parser
-app.use(express.json());
+app.use(express.json({ limit: "512kb" }));
 
 // CORS (используем Bearer, cookie не нужны)
 const corsOrigins =
