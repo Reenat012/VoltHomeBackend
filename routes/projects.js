@@ -7,7 +7,6 @@ import {
 import { getProjectTree, getDelta, applyBatch } from "../services/projectsService.js";
 import { isUuidV4, requiredString, optionalString, isIsoDate, parseLimit } from "../utils/validation.js";
 import { tokenBucket } from "../utils/rateLimit.js";
-import { createProject, listProjects, getProjectMeta, updateProjectMeta, softDeleteProject } from "../models/projects.js";
 
 const router = express.Router();
 
@@ -23,14 +22,12 @@ router.get("/", async (req, res) => {
     const limit = parseLimit(req.query.limit, 50, 200);
 
     const items = await listProjects({ userId: uid, since, limit });
-    // simple offsetless pagination: next = last updated_at (или null, если меньше limit)
     const next = items.length === limit ? items[items.length - 1].updated_at : null;
     res.json({ items, next });
 });
 
 /**
  * POST /v1/projects
- * { id? (uuid), name, note? }
  */
 router.post("/", async (req, res) => {
     const uid = req.user.uid;
@@ -106,14 +103,6 @@ router.get("/:id/delta",
 
 /**
  * POST /v1/projects/:id/batch
- * {
- *   "baseVersion": 12,
- *   "ops": {
- *     "rooms":   {"upsert": [...], "delete": ["uuid1"]},
- *     "groups":  {"upsert": [...], "delete": [...]},
- *     "devices": {"upsert": [...], "delete": [...]}
- *   }
- * }
  */
 router.post("/:id/batch",
     tokenBucket({ limitPerMin: +(process.env.RATE_LIMIT_BATCH_PER_MIN || 30), name: "batch" }),
@@ -126,7 +115,6 @@ router.post("/:id/batch",
         if (baseVersion != null && typeof baseVersion !== "number") {
             return res.status(400).json({ error: "invalid_baseVersion" });
         }
-        // простая DTO-валидация (детализированная — валидация на клиенте)
         if (ops && typeof ops !== "object") return res.status(400).json({ error: "invalid_ops" });
 
         const result = await applyBatch({ userId: uid, projectId: id, baseVersion, ops });
