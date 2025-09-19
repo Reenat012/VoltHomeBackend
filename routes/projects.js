@@ -7,6 +7,7 @@ import {
 import { getProjectTree, getDelta, applyBatch } from "../services/projectsService.js";
 import { isUuidV4, requiredString, optionalString, isIsoDate, parseLimit } from "../utils/validation.js";
 import { tokenBucket } from "../utils/rateLimit.js";
+import { createProject, listProjects, getProjectMeta, updateProjectMeta, softDeleteProject } from "../models/projects.js";
 
 const router = express.Router();
 
