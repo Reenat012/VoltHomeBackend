@@ -1,15 +1,22 @@
+// routes/profile.js
 import express from "express";
-import {authMiddleware} from "../utils/jwt.js";
+import { authMiddleware } from "../utils/jwt.js";
+import { users } from "../stores/users.js";
 
 const router = express.Router();
 
-// GET /profile/me
+// GET /profile/me (защищённый)
 router.get("/me", authMiddleware, (req, res) => {
     const uid = req.user?.uid || "yandex-uid-demo";
-    // Здесь можно подтянуть профиль из БД; пока — детерминированный мок
+    const row = users.get(uid);
+    if (row) {
+        const { displayName, email, avatarUrl, plan, planUntilEpochSeconds } = row;
+        return res.json({ displayName, email, avatarUrl, plan, planUntilEpochSeconds, uid });
+    }
+    // Фолбек, если профиль ещё не сохраняли
     res.json({
         displayName: "Volt User",
-        email: "user@example.com",
+        email: null,
         avatarUrl: null,
         plan: "free",
         planUntilEpochSeconds: null,

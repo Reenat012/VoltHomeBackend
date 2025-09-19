@@ -1,6 +1,7 @@
 // routes/auth.js
 import express from "express";
 import { signToken, authMiddleware, verifyTokenAllowExpired } from "../utils/jwt.js";
+import { users } from "../stores/users.js";
 
 const router = express.Router();
 
@@ -35,13 +36,74 @@ router.post("/login", (req, res) => {
  * POST /auth/yandex/exchange
  * body: { code?: string, uid?: string }
  * Возвращает: { sessionJwt, expiresAtEpochSeconds, (expiresAt), refreshId }
+ *
+ * Примечание: клиент присылает сюда access_token от Yandex SDK в поле "code".
+ * Здесь дергаем login.yandex.ru/info, сохраняем профиль в памяти и выдаём серверную сессию.
  */
-router.post("/yandex/exchange", (req, res) => {
+router.post("/yandex/exchange", async (req, res) => {
     const { code, uid: uidRaw } = req.body || {};
-    // В реале здесь: обмен code -> профиль Яндекса -> uid
+
+    let resolvedUid = null;
+
+    // Пытаемся получить профиль от Яндекса (если пришёл access_token)
+    if (code) {
+        try {
+            const accessToken = String(code);
+            const url = process.env.YA_INFO_URL || "https://login.yandex.ru/info?format=json";
+            const r = await fetch(url, {
+                headers: {
+                    "Authorization": `OAuth ${accessToken}`,
+                    "Accept": "application/json"
+                }
+            });
+            if (!r.ok) {
+                const text = await r.text().catch(() => "");
+                throw new Error(`yandex_info_http_${r.status} ${text}`);
+            }
+            const data = await r.json();
+
+            const yaId = data.id || data.uid || data.default_uid || null;
+            resolvedUid = (uidRaw && String(uidRaw)) || (yaId ? `ya:${yaId}` : null);
+
+            const displayName =
+                data.display_name || data.real_name || data.login || "Yandex User";
+            const email =
+                data.default_email || (Array.isArray(data.emails) ? data.emails[0] : null) || null;
+            const avatarUrl = data.default_avatar_id
+                ? `https://avatars.yandex.net/get-yapic/${data.default_avatar_id}/islands-200`
+                : null;
+
+            const profile = {
+                uid: resolvedUid || (uidRaw && String(uidRaw)) || "yandex-uid-demo",
+                displayName,
+                email,
+                avatarUrl,
+                plan: "free",
+                planUntilEpochSeconds: null
+            };
+            users.set(profile.uid, profile);
+        } catch (e) {
+            console.error("[auth/yandex/exchange] fetch profile failed:", e?.message || e);
+        }
+    }
+
+    // Если профиль не удалось получить — формируем uid из тела/токена/фолбек
     const uid =
+        resolvedUid ||
         (uidRaw && String(uidRaw)) ||
         (code ? `ya:${Buffer.from(String(code)).toString("hex").slice(0, 12)}` : "yandex-uid-demo");
+
+    // Если профиля всё ещё нет — создаём заготовку, чтобы /profile/me не был пустым
+    if (!users.has(uid)) {
+        users.set(uid, {
+            uid,
+            displayName: "Volt User",
+            email: null,
+            avatarUrl: null,
+            plan: "free",
+            planUntilEpochSeconds: null
+        });
+    }
 
     const session = issueSession(uid);
     const refreshId = Math.random().toString(36).slice(2);
@@ -103,9 +165,15 @@ router.post("/session/logout", authMiddleware, (req, res) => {
  */
 router.get("/me", authMiddleware, (req, res) => {
     const uid = req.user?.uid || "yandex-uid-demo";
+    const row = users.get(uid);
+    if (row) {
+        const { displayName, email, avatarUrl, plan, planUntilEpochSeconds } = row;
+        return res.json({ displayName, email, avatarUrl, plan, planUntilEpochSeconds, uid });
+    }
     res.json({
         displayName: "Volt User",
-        email: "user@example.com",
+        email: null,
+        avatarUrl: null,
         plan: "free",
         planUntilEpochSeconds: null,
         uid

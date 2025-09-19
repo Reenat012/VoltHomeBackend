@@ -5,7 +5,9 @@ import cors from "cors";
 import morgan from "morgan";
 
 import authRoutes from "../routes/auth.js";
+import profileRoutes from "../routes/profile.js";
 import { authMiddleware } from "../utils/jwt.js";
+import { users } from "../stores/users.js";
 
 dotenv.config();
 
@@ -55,18 +57,19 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 // Auth API
 app.use("/auth", authRoutes);
 
-// Профиль (защищённый)
-app.get("/profile/me", authMiddleware, (req, res) => {
-    const uid = req.user?.uid || "demo-uid";
-    res.json({
-        displayName: "Volt User",
-        email: "user@example.com",
-        avatarUrl: null,
-        plan: "free",
-        planUntilEpochSeconds: null,
-        uid
-    });
-});
+// Профиль (вариант через отдельный роутер)
+app.use("/profile", profileRoutes);
+
+// (Опционально) Прямой эндпоинт, если хочешь оставить:
+// app.get("/profile/me", authMiddleware, (req, res) => {
+//     const uid = req.user?.uid || "demo-uid";
+//     const row = users.get(uid);
+//     if (row) {
+//         const { displayName, email, avatarUrl, plan, planUntilEpochSeconds } = row;
+//         return res.json({ displayName, email, avatarUrl, plan, planUntilEpochSeconds, uid });
+//     }
+//     res.json({ displayName: "Volt User", email: null, avatarUrl: null, plan: "free", planUntilEpochSeconds: null, uid });
+// });
 
 // 404
 app.use((req, res) => {
