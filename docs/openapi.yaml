@@ -1,0 +1,318 @@
+openapi: 3.0.3
+info:
+  title: VoltHome API
+  version: "1.1.0"
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      summary: Healthcheck
+      responses:
+        "200":
+          description: OK
+  /auth/yandex/exchange:
+    post:
+      summary: Exchange Yandex token (mock) to session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string, nullable: true }
+                uid: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Session info
+  /auth/session/refresh:
+    post:
+      summary: Refresh session (mock)
+      responses:
+        "200": { description: OK }
+  /auth/session/logout:
+    post:
+      summary: Logout (mock)
+      responses:
+        "200": { description: OK }
+  /profile/me:
+    get:
+      summary: Get current profile
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  displayName: { type: string }
+                  email: { type: string, nullable: true }
+                  avatarUrl: { type: string, nullable: true }
+                  plan: { type: string }
+                  planUntilEpochSeconds: { type: integer, nullable: true }
+                  uid: { type: string }
+  /v1/projects:
+    get:
+      summary: List projects (delta by updated_at)
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+      responses:
+        "200":
+          description: Projects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProjectShort"
+                  next:
+                    type: string
+                    nullable: true
+    post:
+      summary: Create project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectFull"
+  /v1/projects/{id}:
+    get:
+      summary: Get project tree
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Project tree
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectTree"
+        "404": { description: Not found }
+    put:
+      summary: Update project meta
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectFull"
+        "404": { description: Not found }
+    delete:
+      summary: Soft delete project
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Soft-deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectFull"
+        "404": { description: Not found }
+  /v1/projects/{id}/delta:
+    get:
+      summary: Get delta by entities
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Delta
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Delta"
+        "404": { description: Not found }
+  /v1/projects/{id}/batch:
+    post:
+      summary: Apply batch operations
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: Batch result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchResponse"
+
+components:
+  schemas:
+    ProjectShort:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        note: { type: string, nullable: true }
+        version: { type: integer }
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+    ProjectFull:
+      allOf:
+        - $ref: "#/components/schemas/ProjectShort"
+      properties:
+        # те же поля
+        {}
+    ProjectCreate:
+      type: object
+      properties:
+        id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        note: { type: string, nullable: true }
+      required: [name]
+    ProjectUpdate:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+    ProjectTree:
+      type: object
+      properties:
+        project: { $ref: "#/components/schemas/ProjectFull" }
+        rooms:
+          type: array
+          items:
+            $ref: "#/components/schemas/Room"
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/Group"
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+    Room:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        meta: { type: object, additionalProperties: true, nullable: true }
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+    Group:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        meta: { type: object, additionalProperties: true, nullable: true }
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        meta: { type: object, additionalProperties: true, nullable: true }
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+    Delta:
+      type: object
+      properties:
+        rooms:
+          $ref: "#/components/schemas/DeltaBucket"
+        groups:
+          $ref: "#/components/schemas/DeltaBucket"
+        devices:
+          $ref: "#/components/schemas/DeltaBucket"
+    DeltaBucket:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/Room"
+              - $ref: "#/components/schemas/Group"
+              - $ref: "#/components/schemas/Device"
+        delete:
+          type: array
+          items:
+            type: string
+            format: uuid
+    BatchRequest:
+      type: object
+      properties:
+        baseVersion: { type: integer, nullable: true }
+        ops:
+          type: object
+          properties:
+            rooms: { $ref: "#/components/schemas/OpBucket" }
+            groups: { $ref: "#/components/schemas/OpBucket" }
+            devices: { $ref: "#/components/schemas/OpBucket" }
+    OpBucket:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid, nullable: true }
+              name: { type: string }
+              meta: { type: object, additionalProperties: true, nullable: true }
+        delete:
+          type: array
+          items:
+            type: string
+            format: uuid
+    BatchResponse:
+      type: object
+      properties:
+        newVersion: { type: integer }
+        conflicts:
+          type: array
+          items:
+            type: object
+            properties:
+              entity: { type: string }
+              id: { type: string }
+              reason: { type: string }
