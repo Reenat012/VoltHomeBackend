@@ -1,61 +1,91 @@
 openapi: 3.0.3
 info:
   title: VoltHome API
-  version: "1.1.0"
+  version: "1.0.0"
+  description: REST API VoltHome (projects + auth refresh sessions)
 servers:
-  - url: /
+  - url: /v1
+
 paths:
-  /healthz:
-    get:
-      summary: Healthcheck
-      responses:
-        "200":
-          description: OK
-  /auth/yandex/exchange:
+  /auth/login:
     post:
-      summary: Exchange Yandex token (mock) to session
+      summary: Issue access/refresh after successful user verification
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [userId]
               properties:
-                code: { type: string, nullable: true }
-                uid: { type: string, nullable: true }
+                userId:
+                  type: string
       responses:
         "200":
-          description: Session info
-  /auth/session/refresh:
-    post:
-      summary: Refresh session (mock)
-      responses:
-        "200": { description: OK }
-  /auth/session/logout:
-    post:
-      summary: Logout (mock)
-      responses:
-        "200": { description: OK }
-  /profile/me:
-    get:
-      summary: Get current profile
-      responses:
-        "200":
-          description: Profile
+          description: tokens issued
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  displayName: { type: string }
-                  email: { type: string, nullable: true }
-                  avatarUrl: { type: string, nullable: true }
-                  plan: { type: string }
-                  planUntilEpochSeconds: { type: integer, nullable: true }
-                  uid: { type: string }
-  /v1/projects:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+
+  /auth/refresh:
+    post:
+      summary: Rotate refresh token and return new access/refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200":
+          description: rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+                  sessionId: { type: string }
+        "401":
+          description: invalid or expired refresh
+
+  /auth/logout:
+    post:
+      summary: Revoke current refresh token
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [refreshToken]
+            properties:
+              refreshToken: { type: string }
+    responses:
+      "200":
+        description: ok
+
+  /auth/logout_all:
+    post:
+      summary: Revoke all refresh sessions for current user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: ok
+
+  /projects:
     get:
-      summary: List projects (delta by updated_at)
+      summary: List projects of current user
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
           name: since
@@ -65,52 +95,40 @@ paths:
           schema: { type: integer, default: 50 }
       responses:
         "200":
-          description: Projects
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/ProjectShort"
-                  next:
-                    type: string
-                    nullable: true
+          description: ok
     post:
       summary: Create project
+      security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ProjectCreate"
+              type: object
+              required: [name]
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string, maxLength: 200 }
+                note: { type: string, maxLength: 2000 }
       responses:
         "201":
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProjectFull"
-  /v1/projects/{id}:
+          description: created
+
+  /projects/{id}:
     get:
       summary: Get project tree
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200":
-          description: Project tree
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProjectTree"
-        "404": { description: Not found }
+        "200": { description: ok }
+        "404": { description: not found }
     put:
       summary: Update project meta
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
@@ -120,33 +138,29 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ProjectUpdate"
+              type: object
+              properties:
+                name: { type: string, maxLength: 200 }
+                note: { type: string, maxLength: 2000 }
       responses:
-        "200":
-          description: Updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProjectFull"
-        "404": { description: Not found }
+        "200": { description: ok }
+        "404": { description: not found }
     delete:
       summary: Soft delete project
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200":
-          description: Soft-deleted
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProjectFull"
-        "404": { description: Not found }
-  /v1/projects/{id}/delta:
+        "200": { description: ok }
+        "404": { description: not found }
+
+  /projects/{id}/delta:
     get:
-      summary: Get delta by entities
+      summary: Delta since timestamp
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
@@ -154,165 +168,40 @@ paths:
           schema: { type: string, format: uuid }
         - in: query
           name: since
+          required: true
           schema: { type: string, format: date-time }
       responses:
-        "200":
-          description: Delta
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Delta"
-        "404": { description: Not found }
-  /v1/projects/{id}/batch:
+        "200": { description: ok }
+        "404": { description: not found }
+
+  /projects/{id}/batch:
     post:
-      summary: Apply batch operations
+      summary: Apply batch (LWW) with optional baseVersion
+      security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string, format: uuid }
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/BatchRequest"
+              type: object
+              properties:
+                baseVersion: { type: integer }
+                ops:
+                  type: object
+                  properties:
+                    rooms: { type: object }
+                    groups: { type: object }
+                    devices: { type: object }
       responses:
-        "200":
-          description: Batch result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BatchResponse"
+        "200": { description: ok }
 
 components:
-  schemas:
-    ProjectShort:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string }
-        note: { type: string, nullable: true }
-        version: { type: integer }
-        updated_at: { type: string, format: date-time }
-        is_deleted: { type: boolean }
-    ProjectFull:
-      allOf:
-        - $ref: "#/components/schemas/ProjectShort"
-      properties:
-        # те же поля
-        {}
-    ProjectCreate:
-      type: object
-      properties:
-        id: { type: string, format: uuid, nullable: true }
-        name: { type: string }
-        note: { type: string, nullable: true }
-      required: [name]
-    ProjectUpdate:
-      type: object
-      properties:
-        name: { type: string, nullable: true }
-        note: { type: string, nullable: true }
-    ProjectTree:
-      type: object
-      properties:
-        project: { $ref: "#/components/schemas/ProjectFull" }
-        rooms:
-          type: array
-          items:
-            $ref: "#/components/schemas/Room"
-        groups:
-          type: array
-          items:
-            $ref: "#/components/schemas/Group"
-        devices:
-          type: array
-          items:
-            $ref: "#/components/schemas/Device"
-    Room:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string }
-        meta: { type: object, additionalProperties: true, nullable: true }
-        updated_at: { type: string, format: date-time }
-        is_deleted: { type: boolean }
-    Group:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string }
-        meta: { type: object, additionalProperties: true, nullable: true }
-        updated_at: { type: string, format: date-time }
-        is_deleted: { type: boolean }
-    Device:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string }
-        meta: { type: object, additionalProperties: true, nullable: true }
-        updated_at: { type: string, format: date-time }
-        is_deleted: { type: boolean }
-    Delta:
-      type: object
-      properties:
-        rooms:
-          $ref: "#/components/schemas/DeltaBucket"
-        groups:
-          $ref: "#/components/schemas/DeltaBucket"
-        devices:
-          $ref: "#/components/schemas/DeltaBucket"
-    DeltaBucket:
-      type: object
-      properties:
-        upsert:
-          type: array
-          items:
-            oneOf:
-              - $ref: "#/components/schemas/Room"
-              - $ref: "#/components/schemas/Group"
-              - $ref: "#/components/schemas/Device"
-        delete:
-          type: array
-          items:
-            type: string
-            format: uuid
-    BatchRequest:
-      type: object
-      properties:
-        baseVersion: { type: integer, nullable: true }
-        ops:
-          type: object
-          properties:
-            rooms: { $ref: "#/components/schemas/OpBucket" }
-            groups: { $ref: "#/components/schemas/OpBucket" }
-            devices: { $ref: "#/components/schemas/OpBucket" }
-    OpBucket:
-      type: object
-      properties:
-        upsert:
-          type: array
-          items:
-            type: object
-            properties:
-              id: { type: string, format: uuid, nullable: true }
-              name: { type: string }
-              meta: { type: object, additionalProperties: true, nullable: true }
-        delete:
-          type: array
-          items:
-            type: string
-            format: uuid
-    BatchResponse:
-      type: object
-      properties:
-        newVersion: { type: integer }
-        conflicts:
-          type: array
-          items:
-            type: object
-            properties:
-              entity: { type: string }
-              id: { type: string }
-              reason: { type: string }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,183 +1,116 @@
 // routes/auth.js
 import express from "express";
-import { signToken, authMiddleware, verifyTokenAllowExpired } from "../utils/jwt.js";
-import { users } from "../stores/users.js";
+import jwt from "jsonwebtoken";
+import { authMiddleware } from "../utils/jwt.js";
+import {
+    createSession,
+    getSessionByToken,
+    rotateSession,
+    markRevoked,
+    revokeAllForUser
+} from "../models/sessions.js";
 
 const router = express.Router();
 
-// Простейшее in-memory хранилище refreshId (dev-мок)
-const refreshStore = new Map();
+const ACCESS_TTL_MIN = +(process.env.ACCESS_TTL_MIN || 30);
+const JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "access_dev_secret";
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "refresh_dev_secret";
 
-function issueSession(uid) {
-    const sessionJwt = signToken({ uid });
-    const ttl = process.env.SESSION_JWT_TTL || "3600s";
-    const seconds = typeof ttl === "string" && ttl.endsWith("s") ? parseInt(ttl) : 3600;
-    const expiresAtEpochSeconds =
-        Math.floor(Date.now() / 1000) + (Number.isFinite(seconds) ? seconds : 3600);
-    // для совместимости со старыми клиентами оставляем expiresAt = expiresAtEpochSeconds
-    const expiresAt = expiresAtEpochSeconds;
-    return { sessionJwt, expiresAtEpochSeconds, expiresAt };
+function issueAccessToken(uid) {
+    return jwt.sign({ uid }, JWT_ACCESS_SECRET, {
+        algorithm: "HS256",
+        expiresIn: `${ACCESS_TTL_MIN}m`,
+    });
+}
+
+function issueRefreshToken(uid) {
+    // exp в JWT для подстраховки; реальный TTL контролируется в БД
+    return jwt.sign({ uid, typ: "refresh" }, JWT_REFRESH_SECRET, {
+        algorithm: "HS256",
+        expiresIn: "90d",
+    });
+}
+
+function getReqMeta(req) {
+    const userAgent = req.get("User-Agent") || null;
+    const ip = (req.headers["x-forwarded-for"] || req.connection?.remoteAddress || req.ip || null);
+    return { userAgent, ip };
 }
 
 /**
- * POST /auth/login
- * body: { uid?: string }
- * Возвращает: { sessionJwt, expiresAtEpochSeconds, (expiresAt), refreshId }
+ * POST /v1/auth/login
+ * Body: { userId }
+ * Выдаёт пару токенов и создаёт refresh-сессию. Предполагается, что userId уже провалидирован.
  */
-router.post("/login", (req, res) => {
-    const { uid = "yandex-uid-demo" } = req.body || {};
-    const session = issueSession(uid);
-    const refreshId = Math.random().toString(36).slice(2);
-    refreshStore.set(refreshId, { uid, valid: true });
-    res.json({ ...session, refreshId });
+router.post("/login", async (req, res) => {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "user_required" });
+
+    const accessToken = issueAccessToken(userId);
+    const refreshToken = issueRefreshToken(userId);
+
+    const { userAgent, ip } = getReqMeta(req);
+    await createSession({ userId, refreshToken, userAgent, ip });
+
+    return res.json({ accessToken, refreshToken });
 });
 
 /**
- * POST /auth/yandex/exchange
- * body: { code?: string, uid?: string }
- * Возвращает: { sessionJwt, expiresAtEpochSeconds, (expiresAt), refreshId }
- *
- * Примечание: клиент присылает сюда access_token от Yandex SDK в поле "code".
- * Здесь дергаем login.yandex.ru/info, сохраняем профиль в памяти и выдаём серверную сессию.
+ * POST /v1/auth/refresh
+ * Body: { refreshToken }
+ * Ротация refresh-токена, возврат новой пары.
  */
-router.post("/yandex/exchange", async (req, res) => {
-    const { code, uid: uidRaw } = req.body || {};
+router.post("/refresh", async (req, res) => {
+    const { refreshToken } = req.body || {};
+    if (!refreshToken) return res.status(400).json({ error: "refresh_required" });
 
-    let resolvedUid = null;
-
-    // Пытаемся получить профиль от Яндекса (если пришёл access_token)
-    if (code) {
-        try {
-            const accessToken = String(code);
-            const url = process.env.YA_INFO_URL || "https://login.yandex.ru/info?format=json";
-            const r = await fetch(url, {
-                headers: {
-                    "Authorization": `OAuth ${accessToken}`,
-                    "Accept": "application/json"
-                }
-            });
-            if (!r.ok) {
-                const text = await r.text().catch(() => "");
-                throw new Error(`yandex_info_http_${r.status} ${text}`);
-            }
-            const data = await r.json();
-
-            const yaId = data.id || data.uid || data.default_uid || null;
-            resolvedUid = (uidRaw && String(uidRaw)) || (yaId ? `ya:${yaId}` : null);
-
-            const displayName =
-                data.display_name || data.real_name || data.login || "Yandex User";
-            const email =
-                data.default_email || (Array.isArray(data.emails) ? data.emails[0] : null) || null;
-            const avatarUrl = data.default_avatar_id
-                ? `https://avatars.yandex.net/get-yapic/${data.default_avatar_id}/islands-200`
-                : null;
-
-            const profile = {
-                uid: resolvedUid || (uidRaw && String(uidRaw)) || "yandex-uid-demo",
-                displayName,
-                email,
-                avatarUrl,
-                plan: "free",
-                planUntilEpochSeconds: null
-            };
-            users.set(profile.uid, profile);
-        } catch (e) {
-            console.error("[auth/yandex/exchange] fetch profile failed:", e?.message || e);
-        }
-    }
-
-    // Если профиль не удалось получить — формируем uid из тела/токена/фолбек
-    const uid =
-        resolvedUid ||
-        (uidRaw && String(uidRaw)) ||
-        (code ? `ya:${Buffer.from(String(code)).toString("hex").slice(0, 12)}` : "yandex-uid-demo");
-
-    // Если профиля всё ещё нет — создаём заготовку, чтобы /profile/me не был пустым
-    if (!users.has(uid)) {
-        users.set(uid, {
-            uid,
-            displayName: "Volt User",
-            email: null,
-            avatarUrl: null,
-            plan: "free",
-            planUntilEpochSeconds: null
-        });
-    }
-
-    const session = issueSession(uid);
-    const refreshId = Math.random().toString(36).slice(2);
-    refreshStore.set(refreshId, { uid, valid: true });
-    res.json({ ...session, refreshId });
-});
-
-/**
- * POST /auth/session/refresh
- * Режимы:
- *   1) Рекомендуемый: Authorization: Bearer <jwt> (может быть истёкшим)
- *   2) Legacy: body { refreshId }
- * Возвращает: { sessionJwt, expiresAtEpochSeconds, (expiresAt) }
- */
-router.post("/session/refresh", (req, res) => {
-    // 1) Bearer-путь
-    const auth = req.header("Authorization") || "";
-    const m = /^Bearer (.+)$/.exec(auth);
-    if (m) {
-        try {
-            // читаем uid даже из истёкшего токена
-            const payload = verifyTokenAllowExpired(m[1]);
-            const uid = payload?.uid || "unknown";
-            const session = issueSession(uid);
-            return res.json(session);
-        } catch {
-            // если Bearer невалиден — попробуем legacy-путь
-        }
-    }
-
-    // 2) Legacy по refreshId
-    const { refreshId } = req.body || {};
-    const row = refreshStore.get(refreshId);
-    if (!row || !row.valid) {
+    let decoded;
+    try {
+        decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+        if (decoded?.typ !== "refresh") throw new Error("wrong_type");
+    } catch {
         return res.status(401).json({ error: "invalid_refresh" });
     }
-    const session = issueSession(row.uid);
-    return res.json(session);
-});
 
-/**
- * POST /auth/session/logout
- * body: { refreshId?: string }
- * Требует валидный Bearer.
- * Возвращает: 200 { ok: true }
- */
-router.post("/session/logout", authMiddleware, (req, res) => {
-    const { refreshId } = req.body || {};
-    if (refreshId && refreshStore.has(refreshId)) {
-        const prev = refreshStore.get(refreshId);
-        refreshStore.set(refreshId, { ...prev, valid: false });
+    const sess = await getSessionByToken(refreshToken);
+    if (!sess) return res.status(401).json({ error: "invalid_refresh" });
+    if (sess.revoked_at) return res.status(401).json({ error: "revoked" });
+    if (new Date(sess.expires_at).getTime() < Date.now()) {
+        await markRevoked(sess.id);
+        return res.status(401).json({ error: "expired" });
     }
-    res.json({ ok: true });
-});
 
-/**
- * GET /auth/me — dev-хелпер (аналог /profile/me)
- * Требует валидный Bearer.
- */
-router.get("/me", authMiddleware, (req, res) => {
-    const uid = req.user?.uid || "yandex-uid-demo";
-    const row = users.get(uid);
-    if (row) {
-        const { displayName, email, avatarUrl, plan, planUntilEpochSeconds } = row;
-        return res.json({ displayName, email, avatarUrl, plan, planUntilEpochSeconds, uid });
-    }
-    res.json({
-        displayName: "Volt User",
-        email: null,
-        avatarUrl: null,
-        plan: "free",
-        planUntilEpochSeconds: null,
-        uid
+    const newRefreshToken = issueRefreshToken(sess.user_id);
+    const newSessionId = await rotateSession({
+        oldSessionId: sess.id,
+        userId: sess.user_id,
+        newRefreshToken
     });
+
+    const accessToken = issueAccessToken(sess.user_id);
+    return res.json({ accessToken, refreshToken: newRefreshToken, sessionId: newSessionId });
+});
+
+/**
+ * POST /v1/auth/logout
+ * Body: { refreshToken }
+ * Ревокация конкретной сессии.
+ */
+router.post("/logout", async (req, res) => {
+    const { refreshToken } = req.body || {};
+    if (!refreshToken) return res.status(400).json({ error: "refresh_required" });
+    const sess = await getSessionByToken(refreshToken);
+    if (sess) await markRevoked(sess.id);
+    return res.json({ ok: true });
+});
+
+/**
+ * POST /v1/auth/logout_all
+ * Требует Bearer access. Ревокация всех активных сессий пользователя.
+ */
+router.post("/logout_all", authMiddleware, async (req, res) => {
+    await revokeAllForUser(req.user.uid);
+    return res.json({ ok: true });
 });
 
 export default router;
