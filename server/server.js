@@ -13,6 +13,7 @@ import { fileURLToPath } from "url";
 // ВАЖНО: из server/ к роутам идём на уровень выше
 import projectsRouter from "../routes/projects.js";
 import authRouter from "../routes/auth.js";
+import pool from "../db/pool.js"; // ✅ пул БД
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +57,17 @@ if (fs.existsSync(openapiPath)) {
 }
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// 🔹 Проверка подключения к БД при старте
+(async () => {
+    try {
+        await pool.query("SELECT 1");
+        console.log("✅ DB connection ok");
+    } catch (e) {
+        console.error("❌ DB connection failed:", e.message);
+        process.exit(1); // завершаем процесс, чтобы PM2 перезапустил
+    }
+})();
 
 const PORT = +(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
