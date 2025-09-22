@@ -1,4 +1,4 @@
-// db/pool.js
+//  db/pool.js
 import pg from "pg";
 
 const {
