@@ -1,28 +1,44 @@
 // db/pool.js
 import pg from "pg";
-import dotenv from "dotenv";
-dotenv.config();
 
-const { Pool } = pg;
+const {
+    PGHOST,
+    PGPORT,
+    PGDATABASE,
+    PGUSER,
+    PGPASSWORD,
+    PGSSLMODE = "require",
+} = process.env;
 
-export const pool = new Pool({
-    host: process.env.PGHOST || "127.0.0.1",
-    port: +(process.env.PGPORT || 5432),
-    database: process.env.PGDATABASE || "volthome",
-    user: process.env.PGUSER || "volthome",
-    password: process.env.PGPASSWORD || "volthome_password",
-    ssl: /require|verify-full/i.test(process.env.PGSSLMODE || "") ? { rejectUnauthorized: false } : false,
+// Никаких молчаливых дефолтов на localhost — лучше упасть сразу.
+if (!PGHOST || !PGDATABASE || !PGUSER || !PGPASSWORD) {
+    throw new Error(
+        "Database config is missing. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD in .env"
+    );
+}
+
+const ssl =
+    (PGSSLMODE || "").toLowerCase() === "require"
+        ? { rejectUnauthorized: false }
+        : false;
+
+export const pool = new pg.Pool({
+    host: PGHOST,
+    port: +(PGPORT || 5432),
+    database: PGDATABASE,
+    user: PGUSER,
+    password: PGPASSWORD,
+    ssl,
     max: 10,
-    idleTimeoutMillis: 30_000
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
 
 export async function query(text, params) {
-    const start = Date.now();
-    const res = await pool.query(text, params);
-    const ms = Date.now() - start;
-    if (process.env.NODE_ENV !== "test") {
-        // простое логирование latency
-        // console.debug(`[pg] ${ms}ms ${text.split('\n')[0]}`);
+    const client = await pool.connect();
+    try {
+        return await client.query(text, params);
+    } finally {
+        client.release();
     }
-    return res;
 }
