@@ -7,7 +7,7 @@ import { signToken } from "../utils/jwt.js";
 import "../server/server.js"; // запускает сервер по конфигу
 // В реальном проекте лучше экспортировать app и использовать server = app.listen(...)
 
-const base = `http://127.0.0.1:${process.env.PORT || 3000}`;
+const base = `http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 3000}`;
 
 function auth() {
     const sessionJwt = signToken({ uid: "test-user" });
@@ -63,11 +63,18 @@ describe("Projects CRUD/Delta/Batch", () => {
     });
 
     test("Batch upsert 300 devices ok", async () => {
-        const devs = Array.from({ length: 300 }, (_, i) => ({ id: undefined, name: `d${i}`, meta: { p: i } }));
+        const devs = Array.from({ length: 300 }, (_, i) => ({
+            id: undefined,
+            name: `d${i}`,
+            meta: { p: i },
+        }));
         const res = await request(base)
             .post(`/v1/projects/${projectId}/batch`)
             .set(auth())
-            .send({ baseVersion: 2, ops: { devices: { upsert: devs, delete: [] } } })
+            .send({
+                baseVersion: 2,
+                ops: { devices: { upsert: devs, delete: [] } },
+            })
             .expect(200);
         expect(res.body.newVersion).toBe(3);
     });
@@ -76,7 +83,10 @@ describe("Projects CRUD/Delta/Batch", () => {
         const res = await request(base)
             .post(`/v1/projects/${projectId}/batch`)
             .set(auth())
-            .send({ baseVersion: 1, ops: { rooms: { upsert: [{ name: "Room A" }] } } })
+            .send({
+                baseVersion: 1,
+                ops: { rooms: { upsert: [{ name: "Room A" }] } },
+            })
             .expect(200);
         expect(res.body.conflicts.length).toBeGreaterThan(0);
     });
