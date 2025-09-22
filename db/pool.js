@@ -1,44 +1,30 @@
-//  db/pool.js
+// db/pool.js
+import "dotenv/config";
 import pg from "pg";
 
-const {
-    PGHOST,
-    PGPORT,
-    PGDATABASE,
-    PGUSER,
-    PGPASSWORD,
-    PGSSLMODE = "require",
-} = process.env;
+const { Pool } = pg;
 
-// Никаких молчаливых дефолтов на localhost — лучше упасть сразу.
+const { PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE } = process.env;
+
 if (!PGHOST || !PGDATABASE || !PGUSER || !PGPASSWORD) {
-    throw new Error(
-        "Database config is missing. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD in .env"
-    );
+    throw new Error("Database config is missing. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD in .env");
 }
 
 const ssl =
-    (PGSSLMODE || "").toLowerCase() === "require"
-        ? { rejectUnauthorized: false }
+    PGSSLMODE && PGSSLMODE.toLowerCase() !== "disable"
+        ? { rejectUnauthorized: false } // для Timeweb Managed PG достаточно require/false
         : false;
 
-export const pool = new pg.Pool({
+export const pool = new Pool({
     host: PGHOST,
-    port: +(PGPORT || 5432),
+    port: Number(PGPORT || 5432),
     database: PGDATABASE,
     user: PGUSER,
     password: PGPASSWORD,
-    ssl,
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    ssl
 });
 
 export async function query(text, params) {
-    const client = await pool.connect();
-    try {
-        return await client.query(text, params);
-    } finally {
-        client.release();
-    }
+    const res = await pool.query(text, params);
+    return res;
 }
