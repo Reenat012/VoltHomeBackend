@@ -21,10 +21,10 @@ export const pool = new Pool({
     database: PGDATABASE,
     user: PGUSER,
     password: PGPASSWORD,
-    ssl
+    ssl,
 });
 
+// Удобная обёртка при импорте, если хочется вызывать напрямую
 export async function query(text, params) {
-    const res = await pool.query(text, params);
-    return res;
+    return pool.query(text, params);
 }
