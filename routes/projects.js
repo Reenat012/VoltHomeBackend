@@ -1,4 +1,3 @@
-// routes/projects.js
 import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
 import {
@@ -6,35 +5,55 @@ import {
     listProjects,
     getProjectMeta,
     updateProjectMeta,
-    softDeleteProject
+    softDeleteProject,
 } from "../models/projects.js";
 import { getProjectTree, getDelta, applyBatch } from "../services/projectsService.js";
-import { isUuidV4, requiredString, optionalString, isIsoDate, parseLimit } from "../utils/validation.js";
+import {
+    isUuidV4,
+    requiredString,
+    optionalString,
+    isIsoDate,
+    parseLimit,
+} from "../utils/validation.js";
 import { tokenBucket } from "../utils/rateLimit.js";
 
 const router = express.Router();
 
-// Все ручки ниже — только под авторизацией
+// Все ручки требуют Bearer
 router.use(authMiddleware);
 
-/**
- * GET /v1/projects?since=timestamp&limit=50
- */
-router.get("/", async (req, res) => {
-    const uid = req.user.uid;
-    const since = req.query.since && isIsoDate(req.query.since) ? req.query.since : "1970-01-01T00:00:00Z";
-    const limit = parseLimit(req.query.limit, 50, 200);
+// Ограничим частоту запросов списка (на пользователя)
+router.get(
+    "/",
+    tokenBucket({ limitPerMin: 120, name: "projects.list" }),
+    async (req, res) => {
+        try {
+            const uid = req.user?.uid;
+            if (!uid) return res.status(401).json({ error: "invalid_token" });
 
-    const items = await listProjects({ userId: uid, since, limit });
-    // pagination token по updated_at: если получили limit элементов — вернём next = updated_at последнего
-    const next = items.length === limit ? items[items.length - 1].updated_at : null;
-    res.json({ items, next });
-});
+            const limit = parseLimit(req.query.limit, 100);
+            const since =
+                req.query.since && isIsoDate(req.query.since) ? req.query.since : null;
 
-/**
- * POST /v1/projects
- * Body: { id? (uuid), name, note? }
- */
+            const items = await listProjects({ userId: uid, since, limit });
+            // Простая пагинация по updated_at: если набрали ровно limit, отдаём next как updated_at последнего
+            const next = items.length === limit ? items[items.length - 1].updated_at : null;
+
+            res.json({ items, next });
+        } catch (err) {
+            // Если это statement timeout — отдаём 503, чтобы клиент не висел до своего таймаута
+            const isTimeout =
+                err?.code === "57014" || /statement timeout/i.test(err?.message || "");
+            if (isTimeout) {
+                return res.status(503).json({ error: "db_timeout" });
+            }
+            console.error("[GET /v1/projects] error:", err);
+            return res.status(500).json({ error: "server_error" });
+        }
+    }
+);
+
+// Создание проекта
 router.post("/", async (req, res) => {
     const uid = req.user.uid;
     const { id, name, note } = req.body || {};
@@ -43,14 +62,13 @@ router.post("/", async (req, res) => {
     if (!optionalString(note, 2000)) return res.status(400).json({ error: "invalid_note" });
 
     const row = await createProject({ id, userId: uid, name, note });
-    // аудит необязателен, не должен ломать запрос
-    try { await req.app.locals?.audit?.(uid, "create_project", "projects", row.id, { name, note }); } catch {}
+    try {
+        await req.app.locals?.audit?.(uid, "create_project", "projects", row.id, { name, note });
+    } catch {}
     res.status(201).json(row);
 });
 
-/**
- * GET /v1/projects/:id — JSON-дерево проекта
- */
+// Получение JSON-дерева проекта
 router.get("/:id", async (req, res) => {
     const uid = req.user.uid;
     const id = req.params.id;
@@ -61,28 +79,34 @@ router.get("/:id", async (req, res) => {
     res.json(tree);
 });
 
-/**
- * PUT /v1/projects/:id — { name?, note? }
- */
-router.put("/:id", async (req, res) => {
+// Метаданные проекта
+router.get("/:id/meta", async (req, res) => {
+    const uid = req.user.uid;
+    const id = req.params.id;
+    if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
+
+    const meta = await getProjectMeta({ userId: uid, projectId: id });
+    if (!meta) return res.status(404).json({ error: "not_found" });
+    res.json(meta);
+});
+
+router.put("/:id/meta", async (req, res) => {
     const uid = req.user.uid;
     const id = req.params.id;
     if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
 
     const { name, note } = req.body || {};
-    if (name != null && !requiredString(name, 200)) return res.status(400).json({ error: "invalid_name" });
-    if (note != null && !optionalString(note, 2000)) return res.status(400).json({ error: "invalid_note" });
+    if (name && !requiredString(name, 200))
+        return res.status(400).json({ error: "invalid_name" });
+    if (note && !optionalString(note, 2000))
+        return res.status(400).json({ error: "invalid_note" });
 
     const row = await updateProjectMeta({ userId: uid, projectId: id, name, note });
     if (!row) return res.status(404).json({ error: "not_found" });
-
-    try { await req.app.locals?.audit?.(uid, "update_project", "projects", id, { name, note }); } catch {}
     res.json(row);
 });
 
-/**
- * DELETE /v1/projects/:id — мягкое удаление
- */
+// Мягкое удаление
 router.delete("/:id", async (req, res) => {
     const uid = req.user.uid;
     const id = req.params.id;
@@ -91,58 +115,60 @@ router.delete("/:id", async (req, res) => {
     const row = await softDeleteProject({ userId: uid, projectId: id });
     if (!row) return res.status(404).json({ error: "not_found" });
 
-    try { await req.app.locals?.audit?.(uid, "delete_project", "projects", id, {}); } catch {}
+    try {
+        await req.app.locals?.audit?.(uid, "delete_project", "projects", id, {});
+    } catch {}
     res.json(row);
 });
 
-/**
- * GET /v1/projects/:id/delta?since=timestamp
- */
-router.get(
-    "/:id/delta",
-    tokenBucket({ limitPerMin: +(process.env.RATE_LIMIT_DELTA_PER_MIN || 60), name: "delta" }),
-    async (req, res) => {
-        const uid = req.user.uid;
-        const id = req.params.id;
-        if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
+// Дельты
+router.get("/:id/delta", async (req, res) => {
+    const uid = req.user.uid;
+    const id = req.params.id;
+    if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
 
-        const since = req.query.since && isIsoDate(req.query.since) ? req.query.since : "1970-01-01T00:00:00Z";
-        const delta = await getDelta({ userId: uid, projectId: id, since });
-        if (!delta) return res.status(404).json({ error: "not_found" });
-        res.json(delta);
-    }
-);
+    const since =
+        req.query.since && isIsoDate(req.query.since)
+            ? req.query.since
+            : "1970-01-01T00:00:00Z";
+    const delta = await getDelta({ userId: uid, projectId: id, since });
+    if (!delta) return res.status(404).json({ error: "not_found" });
+    res.json(delta);
+});
 
-/**
- * POST /v1/projects/:id/batch
- * Body:
- * {
- *   "baseVersion": 12,
- *   "ops": {
- *     "rooms":   {"upsert": [...], "delete": ["uuid1"]},
- *     "groups":  {"upsert": [...], "delete": [...]},
- *     "devices": {"upsert": [...], "delete": [...]}
- *   }
- * }
- */
-router.post(
-    "/:id/batch",
-    tokenBucket({ limitPerMin: +(process.env.RATE_LIMIT_BATCH_PER_MIN || 30), name: "batch" }),
-    async (req, res) => {
-        const uid = req.user.uid;
-        const id = req.params.id;
-        if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
+// Пакетная запись (фикс: try/catch, корректная обработка ошибок)
+router.post("/:id/batch", async (req, res) => {
+    const uid = req.user.uid;
+    const id = req.params.id;
+    if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
 
-        const { baseVersion, ops } = req.body || {};
-        if (baseVersion != null && typeof baseVersion !== "number") {
-            return res.status(400).json({ error: "invalid_baseVersion" });
-        }
-        if (ops && typeof ops !== "object") return res.status(400).json({ error: "invalid_ops" });
-
+    const { baseVersion, ops } = req.body || {};
+    try {
         const result = await applyBatch({ userId: uid, projectId: id, baseVersion, ops });
-        if (result.notFound) return res.status(404).json({ error: "not_found" });
-        res.json({ newVersion: result.newVersion, conflicts: result.conflicts });
+
+        try {
+            const opsCount =
+                ops && typeof ops === "object"
+                    ? Object.values(ops).reduce(
+                        (n, v) => n + (v?.upsert?.length || 0) + (v?.delete?.length || 0),
+                        0
+                    )
+                    : 0;
+            await req.app.locals?.audit?.(uid, "apply_batch", "projects", id, {
+                baseVersion,
+                opsCount,
+            });
+        } catch {}
+
+        return res.json(result);
+    } catch (err) {
+        const isTimeout =
+            err?.code === "57014" || /statement timeout/i.test(err?.message || "");
+        console.error("[POST /v1/projects/:id/batch] error:", err?.message || err);
+        return res.status(isTimeout ? 503 : 500).json({
+            error: isTimeout ? "db_timeout" : "server_error",
+        });
     }
-);
+});
 
 export default router;
