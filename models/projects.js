@@ -12,13 +12,15 @@ export async function createProject({ id, userId, name, note }) {
 }
 
 export async function listProjects({ userId, since, limit }) {
+    // ВАЖНО: предикат устойчив к NULL — если since не задан, не фильтруем по updated_at
     const res = await query(
         `SELECT id, name, note, version, updated_at, is_deleted
          FROM projects
-         WHERE user_id=$1 AND updated_at > $2
+         WHERE user_id = $1
+           AND ($2::timestamptz IS NULL OR updated_at > $2::timestamptz)
          ORDER BY updated_at ASC
              LIMIT $3`,
-        [userId, since, limit]
+        [userId, since || null, limit]
     );
     return res.rows;
 }
