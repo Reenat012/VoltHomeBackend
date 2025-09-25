@@ -25,8 +25,10 @@ import {
     deltaDevices,
     getDevicesByProject,
 } from "../models/devices.js";
-import { nowUtcIso } from "../utils/time.js";
 
+/**
+ * Удобный конструктор описания конфликта (например, при устаревшем baseVersion).
+ */
 function conflict(reason, entity, id) {
     return { entity, id, reason };
 }
@@ -112,7 +114,7 @@ export async function getDelta({ userId, projectId, since }) {
  * - Аудит выносим ВНЕ транзакции и делаем best-effort (не роняет батч).
  *
  * ВАЖНО:
- *  - upsertRooms/Groups/Devices вызываем с (projectId, items) — без userId
+ *  - upsertRooms/Groups/Devices вызываем как (projectId, items) — без userId
  *  - если UPDATE projects ничего не вернул — newVersion = meta.version + 1
  */
 export async function applyBatch({ userId, projectId, baseVersion, ops }) {
@@ -126,11 +128,11 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
     let newVersion = meta.version + 1;
     try {
         // LWW: апсерты перезаписывают, delete ставит tombstone.
-        if (ops?.rooms?.upsert?.length) await upsertRooms(projectId, ops.rooms.upsert);
+        if (ops?.rooms?.upsert?.length)  await upsertRooms(projectId, ops.rooms.upsert);
         if (ops?.groups?.upsert?.length) await upsertGroups(projectId, ops.groups.upsert);
         if (ops?.devices?.upsert?.length) await upsertDevices(projectId, ops.devices.upsert);
 
-        if (ops?.rooms?.delete?.length) await deleteRooms(projectId, ops.rooms.delete);
+        if (ops?.rooms?.delete?.length)  await deleteRooms(projectId, ops.rooms.delete);
         if (ops?.groups?.delete?.length) await deleteGroups(projectId, ops.groups.delete);
         if (ops?.devices?.delete?.length) await deleteDevices(projectId, ops.devices.delete);
 
@@ -138,23 +140,22 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
             `UPDATE projects
              SET version = version + 1, updated_at = now()
              WHERE id = $1 AND user_id = $2
-             RETURNING version`,
+                 RETURNING version`,
             [projectId, userId]
         );
         newVersion = verRes.rows?.[0]?.version ?? meta.version + 1;
 
         if (stale) {
-            const kind = "Stale baseVersion; server wins (LWW)";
-            for (const arr of [
-                (ops?.rooms?.upsert || []).map((x) => ["rooms", x.id]),
-                (ops?.groups?.upsert || []).map((x) => ["groups", x.id]),
-                (ops?.devices?.upsert || []).map((x) => ["devices", x.id]),
-                (ops?.rooms?.delete || []).map((id) => ["rooms", id]),
-                (ops?.groups?.delete || []).map((id) => ["groups", id]),
-                (ops?.devices?.delete || []).map((id) => ["devices", id]),
-            ]) {
-                for (const [entity, id] of arr) conflicts.push(conflict(kind, entity, id));
-            }
+            const reason = "Stale baseVersion; server wins (LWW)";
+            const items = [
+                ...(ops?.rooms?.upsert  || []).map((x) => ["rooms", x.id]),
+                ...(ops?.groups?.upsert || []).map((x) => ["groups", x.id]),
+                ...(ops?.devices?.upsert|| []).map((x) => ["devices", x.id]),
+                ...(ops?.rooms?.delete  || []).map((id) => ["rooms", id]),
+                ...(ops?.groups?.delete || []).map((id) => ["groups", id]),
+                ...(ops?.devices?.delete|| []).map((id) => ["devices", id]),
+            ];
+            for (const [entity, id] of items) conflicts.push(conflict(reason, entity, id));
         }
 
         await query("COMMIT");
@@ -163,7 +164,7 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
         throw e;
     }
 
-    // Аудит — уже вне транзакции; ошибки не мешают основному результату.
+    // Аудит — вне транзакции; ошибки не мешают основному результату.
     try {
         await tryAuditBestEffort({
             userId,
@@ -174,17 +175,16 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
                 baseVersion,
                 newVersion,
                 counts: {
-                    roomsUpsert: ops?.rooms?.upsert?.length || 0,
-                    roomsDelete: ops?.rooms?.delete?.length || 0,
-                    groupsUpsert: ops?.groups?.upsert?.length || 0,
-                    groupsDelete: ops?.groups?.delete?.length || 0,
-                    devicesUpsert: ops?.devices?.upsert?.length || 0,
-                    devicesDelete: ops?.devices?.delete?.length || 0,
+                    roomsUpsert:  ops?.rooms?.upsert?.length   || 0,
+                    roomsDelete:  ops?.rooms?.delete?.length   || 0,
+                    groupsUpsert: ops?.groups?.upsert?.length  || 0,
+                    groupsDelete: ops?.groups?.delete?.length  || 0,
+                    devicesUpsert:ops?.devices?.upsert?.length || 0,
+                    devicesDelete:ops?.devices?.delete?.length || 0,
                 },
             },
         });
     } catch (e) {
-        // на всякий случай (tryAuditBestEffort и так глотает несовпадение колонок)
         console.warn("[audit] unexpected error:", e?.message || e);
     }
 

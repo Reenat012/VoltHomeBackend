@@ -1,6 +1,11 @@
 // models/devices.js
 import { query } from "../db/pool.js";
 
+/**
+ * Апсерт устройств в рамках проекта.
+ * Поддерживаем как d.groupId, так и d.group_id.
+ * meta нормализуем: если пришла строка — пишем как есть, если объект — JSON.stringify.
+ */
 export async function upsertDevices(projectId, items) {
     if (!items?.length) return [];
     const values = [];
@@ -8,15 +13,20 @@ export async function upsertDevices(projectId, items) {
     let i = 1;
 
     for (const d of items) {
+        const groupId = ("groupId" in d) ? d.groupId : (("group_id" in d) ? d.group_id : null);
+        const metaJson = d.meta
+            ? (typeof d.meta === "string" ? d.meta : JSON.stringify(d.meta))
+            : null;
+
         values.push(
             `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, $${i++}, now(), false)`
         );
         params.push(
-            d.id || null,               // id
-            projectId,                  // project_id
-            d.groupId || null,          // group_id <-- ВАЖНО: сохраняем связь с группой
-            d.name,                     // name
-            d.meta ? JSON.stringify(d.meta) : null // meta
+            d.id || null,     // id
+            projectId,        // project_id
+            groupId || null,  // group_id
+            d.name ?? null,   // name
+            metaJson          // meta
         );
     }
 
@@ -46,9 +56,14 @@ export async function deleteDevices(projectId, ids) {
              RETURNING id`,
         [projectId, ids]
     );
-    return res.rows.map(r => r.id);
+    return res.rows.map((r) => r.id);
 }
 
+/**
+ * Дельта устройств.
+ * ВАЖНО: не выбираем несуществующие столбцы (например, room_id),
+ * так как привязка комнаты хранится в meta.room_id по текущей схеме.
+ */
 export async function deltaDevices(projectId, sinceIso) {
     const res = await query(
         `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
