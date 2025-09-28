@@ -53,7 +53,7 @@ export async function deltaGroups(projectId, sinceIso) {
     const res = await query(
         `SELECT id, project_id, room_id, name, meta, updated_at, is_deleted
          FROM groups
-         WHERE project_id = $1 AND updated_at > $2
+         WHERE project_id = $1 AND updated_at >= $2   -- было '>'
          ORDER BY updated_at ASC`,
         [projectId, sinceIso]
     );
