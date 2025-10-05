@@ -15,6 +15,8 @@ import projectsRouter from "../routes/projects.js";
 import authRouter from "../routes/auth.js";
 import { pool } from "../db/pool.js";
 
+import profileRouter from "../routes/profile.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -36,6 +38,7 @@ app.locals.audit = async () => {};
 // Роуты
 app.use("/v1/projects", projectsRouter);
 app.use("/v1/auth", authRouter);
+app.use("/v1/profile", profileRouter);
 
 // Swagger UI (docs на уровень выше)
 const openapiPath = path.join(__dirname, "../docs/openapi.yaml");

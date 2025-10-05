@@ -1,0 +1,421 @@
+openapi: 3.0.3
+info:
+  title: VoltHome Projects API
+  version: 1.0.0
+  description: >
+    Минимальный контракт для синка проектов (snapshot, delta, batch upsert/delete).
+    Этот файл — "источник правды" для клиента и сервера.
+
+servers:
+  - url: https://api.example.com
+    description: Production
+  - url: http://localhost:3000
+    description: Local dev
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/projects:
+    get:
+      summary: List projects
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time, nullable: true }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectsListResponse' }
+    post:
+      summary: Create project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProjectRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectShortDto' }
+
+  /v1/projects/{id}:
+    get:
+      summary: Get project snapshot (tree)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectTreeDto' }
+    put:
+      summary: Update project meta
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectShortDto' }
+    delete:
+      summary: Delete project (soft-delete)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectShortDto' }
+
+  /v1/projects/{id}/delta:
+    get:
+      summary: Get delta since timestamp
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: since
+          required: true
+          description: ISO 8601 timestamp (inclusive lower bound)
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectDeltaResponse' }
+
+  /v1/projects/{id}/batch:
+    post:
+      summary: Apply a batch (upsert/delete) for rooms/groups/devices
+      description: |
+        Для **upsert**:
+        - `rooms.upsert[]`: клиент присылает **обязательный** `id` (UUID, генерируемый клиентом),
+          `name`, `meta`.
+        - `devices.upsert[]`: `id` может быть **null** (сервер сгенерирует), `group_id` — null,
+          `name`, `meta.room_id` (UUID комнаты) обязателен.
+        - `groups.upsert[]`: по аналогии с rooms/devices, если используется.
+
+        Для **delete**:
+        - `rooms.delete[]`, `devices.delete[]`, `groups.delete[]` — массив UUID удаляемых сущностей.
+        - Каскад на сервере может быть отключён — клиент вправе прислать одновременно
+          `rooms.delete` и соответствующие `devices.delete` для этой комнаты.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectBatchRequest' }
+            examples:
+              deleteRoomAndDevices:
+                summary: Delete a room + its devices
+                value:
+                  baseVersion: null
+                  ops:
+                    rooms:
+                      upsert: []
+                      delete: ["b86895d2-15cc-488e-b079-b770de273e66"]
+                    devices:
+                      upsert: []
+                      delete:
+                        - "0718dfad-d7f1-4e63-a83d-692e29bd51e2"
+                        - "ceec8f9b-b24c-4922-89e4-a1b9f7f73e9c"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBatchResponse' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    # -------- Projects --------
+    ProjectsListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectShortDto' }
+        next:
+          type: string
+          nullable: true
+
+    CreateProjectRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+        note:
+          type: string
+          nullable: true
+      required: [name]
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+
+    ProjectShortDto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        note: { type: string, nullable: true }
+        version: { type: integer }
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+      required: [id, name, version, updated_at, is_deleted]
+
+    # -------- Snapshot --------
+    ProjectTreeDto:
+      type: object
+      properties:
+        project: { $ref: '#/components/schemas/ProjectShortDto' }
+        rooms:
+          type: array
+          items: { $ref: '#/components/schemas/RoomDto' }
+        groups:
+          type: array
+          items: { $ref: '#/components/schemas/GroupDto' }
+        devices:
+          type: array
+          items: { $ref: '#/components/schemas/DeviceDto' }
+      required: [project, rooms, groups, devices]
+
+    RoomDto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        meta:
+          type: object
+          additionalProperties: true
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+      required: [id, name, updated_at, is_deleted]
+
+    GroupDto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, nullable: true }
+        meta:
+          type: object
+          additionalProperties: true
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+      required: [id, updated_at, is_deleted]
+
+    DeviceDto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        group_id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        meta:
+          type: object
+          additionalProperties: true
+        updated_at: { type: string, format: date-time }
+        is_deleted: { type: boolean }
+      required: [id, name, updated_at, is_deleted]
+
+    # -------- Delta --------
+    ProjectDeltaResponse:
+      type: object
+      properties:
+        rooms: { $ref: '#/components/schemas/ChangeSetRooms' }
+        groups: { $ref: '#/components/schemas/ChangeSetGroups' }
+        devices: { $ref: '#/components/schemas/ChangeSetDevices' }
+      required: [rooms, groups, devices]
+
+    ChangeSetRooms:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/RoomDto' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+      required: [upsert, delete]
+
+    ChangeSetGroups:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/GroupDto' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+      required: [upsert, delete]
+
+    ChangeSetDevices:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/DeviceDto' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+      required: [upsert, delete]
+
+    # -------- Batch --------
+    ProjectBatchRequest:
+      type: object
+      properties:
+        baseVersion:
+          type: integer
+          nullable: true
+          description: >
+            Опционально — номер версии, на которую опирается клиент (для optimistic locking).
+            Если null — сервер применяет best-effort.
+        ops:
+          $ref: '#/components/schemas/Ops'
+      required: [ops]
+
+    Ops:
+      type: object
+      properties:
+        rooms: { $ref: '#/components/schemas/RoomOpsBucket' }
+        groups: { $ref: '#/components/schemas/GroupOpsBucket' }
+        devices: { $ref: '#/components/schemas/DeviceOpsBucket' }
+
+    RoomOpsBucket:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/RoomUpsert' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+
+    GroupOpsBucket:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/GroupUpsert' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+
+    DeviceOpsBucket:
+      type: object
+      properties:
+        upsert:
+          type: array
+          items: { $ref: '#/components/schemas/DeviceUpsert' }
+        delete:
+          type: array
+          items: { type: string, format: uuid }
+
+    RoomUpsert:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUID комнаты. Клиент генерирует сам.
+        name:
+          type: string
+        meta:
+          type: object
+          additionalProperties: true
+          description: |
+            Пример:
+              - room_type: "KITCHEN" | "BATHROOM" | "STANDARD" | ...
+              - created_at_iso: ISO-8601 timestamp
+      required: [id, name]
+
+    GroupUpsert:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        meta:
+          type: object
+          additionalProperties: true
+
+    DeviceUpsert:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID устройства. Может быть null — сервер сгенерирует.
+        group_id:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+        meta:
+          type: object
+          additionalProperties: true
+          description: |
+            Обязательные ключи:
+              - room_id: UUID комнаты (источник истины)
+            Прочее:
+              - power, demand_ratio, power_factor, has_motor,
+                requires_dedicated, requires_socket,
+                voltage_value, voltage_type, created_at_iso
+      required: [name, meta]
+
+    ProjectBatchResponse:
+      type: object
+      properties:
+        project:
+          $ref: '#/components/schemas/ProjectShortDto'
+        # За деталями применения можно добавить поля в будущем (например, counts)
