@@ -1,11 +1,10 @@
-// routes/profile.js
 import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
 import { users } from "../stores/users.js";
 
 const router = express.Router();
 
-// GET /profile/me (защищённый)
+// GET /v1/profile/me (защищённый)
 router.get("/me", authMiddleware, (req, res) => {
     const uid = req.user?.uid || "yandex-uid-demo";
     const row = users.get(uid);

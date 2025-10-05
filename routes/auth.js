@@ -8,6 +8,7 @@ import {
     markRevoked,
     revokeAllForUser
 } from "../models/sessions.js";
+import { upsertUser, users } from "../stores/users.js";
 
 const router = express.Router();
 
@@ -65,22 +66,59 @@ function withTimeout(promise, ms, onTimeoutMsg = "timeout") {
     });
 }
 
+/** --- Яндекс профиль --- */
+function bestName(info) {
+    return info?.real_name || info?.display_name || info?.login || "Volt User";
+}
+function avatarUrlFrom(info, preset = "islands-200") {
+    const id = info?.default_avatar_id;
+    return id ? `https://avatars.yandex.net/get-yapic/${id}/${preset}` : null;
+}
+async function tryFetchYandexInfo(yaAccessToken) {
+    if (!yaAccessToken) return null;
+    try {
+        // Node 18+ имеет глобальный fetch
+        const resp = await fetch("https://login.yandex.ru/info?format=json", {
+            headers: { Authorization: `OAuth ${yaAccessToken}` }
+        });
+        if (!resp.ok) return null;
+        const json = await resp.json();
+        return {
+            displayName: bestName(json),
+            email: json?.default_email ?? null,
+            avatarUrl: avatarUrlFrom(json),
+        };
+    } catch {
+        return null;
+    }
+}
+
 /**
  * ============================
  *  Ручки под контракт клиента
  * ============================
  */
 
-/** POST /v1/auth/yandex/exchange */
+/**
+ * POST /v1/auth/yandex/exchange
+ *
+ * Принимает:
+ *  - code или uid (как было)
+ *  - опционально yaAccessToken (access_token Яндекса) — если пришёл, сервер сам запросит профиль
+ *  - опционально profile { displayName, email, avatarUrl } — если клиент уже знает профиль
+ *
+ * Итог: создаём refresh-сессию и сохраняем профиль в in-memory store `users`.
+ */
 router.post("/yandex/exchange", async (req, res) => {
-    const { code, uid } = req.body || {};
+    const { code, uid, yaAccessToken, profile } = req.body || {};
     if (!code && !uid) return res.status(400).json({ error: "uid_or_code_required" });
 
+    // uid формируем как и прежде (совместимость)
     const userId = uid || `ya_${String(code).slice(0, 24)}`;
     const accessToken = issueAccessToken(userId);
     const refreshToken = issueRefreshToken(userId);
 
-    // Быстрый отказ, если БД «лежит»
+    // Пишем refresh-сессию
     try {
         const { userAgent, ip } = getReqMeta(req);
         await withTimeout(
@@ -89,9 +127,34 @@ router.post("/yandex/exchange", async (req, res) => {
             "db_timeout"
         );
     } catch (e) {
-        // Не записали сессию — не отдаём refreshId, чтобы не порождать «битые» сессии
         return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
     }
+
+    // --- Сохранение профиля ---
+    // 1) Если клиент уже прислал profile — используем его
+    let resolvedProfile = (profile && typeof profile === "object")
+        ? {
+            displayName: String(profile.displayName || "").trim() || null,
+            email: profile.email ?? null,
+            avatarUrl: profile.avatarUrl ?? null,
+        }
+        : null;
+
+    // 2) Иначе попробуем сами сходить в Яндекс по yaAccessToken
+    if (!resolvedProfile) {
+        const fetched = await tryFetchYandexInfo(yaAccessToken);
+        if (fetched) resolvedProfile = fetched;
+    }
+
+    // 3) Апсертим (с минимальными дефолтами)
+    upsertUser(userId, {
+        displayName: resolvedProfile?.displayName || "Volt User",
+        email: resolvedProfile?.email ?? null,
+        avatarUrl: resolvedProfile?.avatarUrl ?? null,
+        // План пока фиксируем "free"; если позже появится биллинг — обновим.
+        plan: users.get(userId)?.plan || "free",
+        planUntilEpochSeconds: users.get(userId)?.planUntilEpochSeconds ?? null,
+    });
 
     return res.json(buildSessionResponse({ accessToken, refreshToken }));
 });
@@ -177,6 +240,9 @@ router.post("/login", async (req, res) => {
     } catch (e) {
         return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
     }
+
+    // хотя бы дефолтный профиль, если его ещё нет
+    upsertUser(userId, { displayName: "Volt User", email: null, avatarUrl: null });
 
     return res.json(buildSessionResponse({ accessToken, refreshToken }));
 });
