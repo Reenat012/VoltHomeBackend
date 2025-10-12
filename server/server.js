@@ -25,7 +25,7 @@ app.set("trust proxy", true);
 
 /**
  * Принудительный редирект HTTP -> HTTPS (TLS завершается на балансировщике).
- * Отключить можно установив DISABLE_HTTPS_REDIRECT=true (например, для локалки).
+ * Отключить можно установив DISABLE_HTTPS_REDIRECT=true (например, для локалки)
  */
 const httpsRedirectDisabled =
     String(process.env.DISABLE_HTTPS_REDIRECT || "").toLowerCase() === "true";
