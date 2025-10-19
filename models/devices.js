@@ -27,14 +27,9 @@ function extractRoomId(meta) {
  *
  * Поведение:
  * - Если d.id задан — обычный LWW по id (INSERT ... ON CONFLICT (id) DO UPDATE).
- * - Если d.id отсутствует — идемпотентная логика:
- *   ищем существующую (project_id, name, meta->>'room_id') при is_deleted=false.
- *   Если нашли — делаем UPDATE; если нет — INSERT с новым uuid.
- *
- * Почему так:
- * Клиент при создании «черновых» устройств шлёт их без id, полагаясь на
- * соответствие (комната + имя). Такая серверная логика предотвращает
- * дубли при ретраях batch-запроса.
+ * - Если d.id отсутствует — ИДЕМПОТЕНТНЫЙ UPSERT одной командой:
+ *   INSERT ... ON CONFLICT ON CONSTRAINT ux_devices_project_room_name_alive DO UPDATE
+ *   (требуется уникальный индекс на (project_id, meta->>'room_id', lower(name)) WHERE is_deleted=false).
  */
 export async function upsertDevices(projectId, items) {
     if (!items?.length) return [];
@@ -52,77 +47,61 @@ export async function upsertDevices(projectId, items) {
         let i = 1;
 
         for (const d of withId) {
-            const groupId = ("groupId" in d) ? d.groupId : (("group_id" in d) ? d.group_id : null);
-            values.push(`(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, $${i++}, now(), false)`);
+            const groupId =
+                "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
+            values.push(
+                `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, $${i++}, now(), false)`
+            );
             params.push(
-                d.id || null,         // id
-                projectId,            // project_id
-                groupId || null,      // group_id
-                d.name ?? null,       // name
-                metaToJson(d.meta)    // meta
+                d.id || null, // id
+                projectId, // project_id
+                groupId || null, // group_id
+                d.name ?? null, // name
+                metaToJson(d.meta) // meta
             );
         }
 
         const sql = `
-      INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
-      VALUES ${values.join(",")}
-      ON CONFLICT (id) DO UPDATE SET
-        project_id = EXCLUDED.project_id,
-        group_id   = EXCLUDED.group_id,
-        name       = COALESCE(EXCLUDED.name, devices.name),
-        meta       = COALESCE(EXCLUDED.meta, devices.meta),
-        updated_at = now(),
-        is_deleted = false
-      RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted;
-    `;
+            INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
+            VALUES ${values.join(",")}
+                ON CONFLICT (id) DO UPDATE SET
+                project_id = EXCLUDED.project_id,
+                                        group_id   = EXCLUDED.group_id,
+                                        name       = COALESCE(EXCLUDED.name, devices.name),
+                                        meta       = COALESCE(EXCLUDED.meta, devices.meta),
+                                        updated_at = now(),
+                                        is_deleted = false
+                                        RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted;
+        `;
         const res = await query(sql, params);
         rows.push(...res.rows);
     }
 
-    // 2) идемпотентная обработка без id — по (project_id, room_id, name)
+    // 2) идемпотентная обработка без id — один UPSERT по частичному индексу
     for (const d of noId) {
-        const groupId = ("groupId" in d) ? d.groupId : (("group_id" in d) ? d.group_id : null);
+        const groupId =
+            "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
         const metaJson = metaToJson(d.meta);
-        const roomId = extractRoomId(d.meta);
-
-        if (roomId && d.name) {
-            // ищем живую запись (не удалённую) с тем же project_id, room_id (в meta) и именем
-            const sel = await query(
-                `SELECT id
-           FROM devices
-          WHERE project_id = $1
-            AND name = $2
-            AND (meta->>'room_id') = $3
-            AND is_deleted = false
-          LIMIT 1`,
-                [projectId, d.name, String(roomId)]
-            );
-
-            if (sel.rows[0]?.id) {
-                // UPDATE существующей — LWW
-                const u = await query(
-                    `UPDATE devices
-              SET group_id   = COALESCE($3, group_id),
-                  name       = COALESCE($4, name),
-                  meta       = COALESCE($5, meta),
-                  updated_at = now(),
-                  is_deleted = false
-            WHERE id = $2 AND project_id = $1
-        RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted`,
-                    [projectId, sel.rows[0].id, groupId || null, d.name ?? null, metaJson]
-                );
-                rows.push(u.rows[0]);
-                continue;
-            }
-        }
-
-        // INSERT новой — если не нашли подходящую
-        const ins = await query(
-            `INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
-       VALUES (uuid_generate_v4(), $1, $2, $3, $4, now(), false)
-   RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted`,
-            [projectId, groupId || null, d.name ?? null, metaJson]
-        );
+        // room_id из meta должен присутствовать, чтобы корректно сработал уникальный ключ
+        // (если его нет, всё равно выполняем INSERT — индекс не задействуется)
+        const sql = `
+      INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
+      VALUES (uuid_generate_v4(), $1, $2, $3, $4, now(), false)
+      ON CONFLICT ON CONSTRAINT ux_devices_project_room_name_alive
+      DO UPDATE SET
+        group_id   = COALESCE(EXCLUDED.group_id, devices.group_id),
+        name       = COALESCE(EXCLUDED.name, devices.name),
+        meta       = COALESCE(EXCLUDED.meta, devices.meta),
+        updated_at = now(),
+        is_deleted = false
+      RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
+    `;
+        const ins = await query(sql, [
+            projectId,
+            groupId || null,
+            d.name ?? null,
+            metaJson,
+        ]);
         rows.push(ins.rows[0]);
     }
 
@@ -151,10 +130,10 @@ export async function deleteDevices(projectId, ids) {
 export async function deltaDevices(projectId, sinceIso) {
     const res = await query(
         `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
-       FROM devices
-      WHERE project_id = $1
-        AND updated_at >= $2
-      ORDER BY updated_at ASC`,
+         FROM devices
+         WHERE project_id = $1
+           AND updated_at >= $2
+         ORDER BY updated_at ASC`,
         [projectId, sinceIso]
     );
     return res.rows;
