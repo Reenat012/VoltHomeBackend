@@ -1,3 +1,4 @@
+// routes/projects.js
 import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
 import {
@@ -16,6 +17,14 @@ import {
     parseLimit,
 } from "../utils/validation.js";
 import { tokenBucket } from "../utils/rateLimit.js";
+
+// 👇 NEW: работа с устройствами по id (CRUD и поиск по имени)
+import {
+    getDevicesByProject,
+    getDevicesByNameCI,
+    upsertDevices,
+    deleteDevices,
+} from "../models/devices.js";
 
 const router = express.Router();
 
@@ -285,6 +294,93 @@ router.post("/:id/batch", async (req, res) => {
         return res.status(isTimeout ? 503 : 500).json({
             error: isTimeout ? "db_timeout" : "server_error",
         });
+    }
+});
+
+/* =========================================================
+ * NEW: Устройства — работа по id и поиск по имени (массив)
+ * ========================================================= */
+
+/**
+ * GET /v1/projects/:projectId/devices
+ *  - без query.name → все устройства проекта
+ *  - с query.name   → поиск по имени (массив)
+ */
+router.get("/:projectId/devices", async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        if (!isUuidV4(projectId)) return res.status(400).json({ error: "invalid_id" });
+
+        const { name } = req.query;
+        if (typeof name === "string" && name.length) {
+            const rows = await getDevicesByNameCI(projectId, name);
+            return res.json(rows);
+        }
+        const rows = await getDevicesByProject(projectId);
+        return res.json(rows);
+    } catch (err) {
+        console.error(
+            "[GET /v1/projects/:projectId/devices] error:",
+            err?.message || err,
+            "| code:", err?.code,
+            "| detail:", err?.detail,
+            "| constraint:", err?.constraint,
+            "| table:", err?.table
+        );
+        return res.status(500).json({ error: "server_error" });
+    }
+});
+
+/**
+ * PUT /v1/projects/:projectId/devices/:deviceId
+ * Обновление по id (upsert-стиль по id).
+ * Если такого id нет — будет создано устройство с этим id.
+ */
+router.put("/:projectId/devices/:deviceId", async (req, res) => {
+    try {
+        const { projectId, deviceId } = req.params;
+        if (!isUuidV4(projectId) || !isUuidV4(deviceId)) {
+            return res.status(400).json({ error: "invalid_id" });
+        }
+        const payload = { ...req.body, id: deviceId };
+        const rows = await upsertDevices(projectId, [payload]);
+        return res.json(rows[0] ?? null);
+    } catch (err) {
+        console.error(
+            "[PUT /v1/projects/:projectId/devices/:deviceId] error:",
+            err?.message || err,
+            "| code:", err?.code,
+            "| detail:", err?.detail,
+            "| constraint:", err?.constraint,
+            "| table:", err?.table
+        );
+        return res.status(500).json({ error: "server_error" });
+    }
+});
+
+/**
+ * DELETE /v1/projects/:projectId/devices/:deviceId
+ * Soft-delete по id.
+ */
+router.delete("/:projectId/devices/:deviceId", async (req, res) => {
+    try {
+        const { projectId, deviceId } = req.params;
+        if (!isUuidV4(projectId) || !isUuidV4(deviceId)) {
+            return res.status(400).json({ error: "invalid_id" });
+        }
+        const deletedIds = await deleteDevices(projectId, [deviceId]);
+        const ok = deletedIds.includes(deviceId);
+        return res.json({ ok, deleted: ok ? 1 : 0 });
+    } catch (err) {
+        console.error(
+            "[DELETE /v1/projects/:projectId/devices/:deviceId] error:",
+            err?.message || err,
+            "| code:", err?.code,
+            "| detail:", err?.detail,
+            "| constraint:", err?.constraint,
+            "| table:", err?.table
+        );
+        return res.status(500).json({ error: "server_error" });
     }
 });
 

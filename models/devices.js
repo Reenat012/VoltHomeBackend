@@ -26,10 +26,10 @@ function extractRoomId(meta) {
  * Апсерт устройств в рамках проекта.
  *
  * Поведение:
- * - Если d.id задан — обычный LWW по id (INSERT ... ON CONFLICT (id) DO UPDATE).
- * - Если d.id отсутствует — ИДЕМПОТЕНТНЫЙ UPSERT одной командой:
- *   INSERT ... ON CONFLICT ON CONSTRAINT ux_devices_project_room_name_alive DO UPDATE
- *   (требуется уникальный индекс на (project_id, meta->>'room_id', lower(name)) WHERE is_deleted=false).
+ * - Если d.id задан — UPSERT по первичному ключу (INSERT ... ON CONFLICT (id) DO UPDATE).
+ * - Если d.id отсутствует — ВСЕГДА создаём новое устройство (uuid_generate_v4()).
+ *
+ * Никакой уникальности/идемпотентности по name больше нет.
  */
 export async function upsertDevices(projectId, items) {
     if (!items?.length) return [];
@@ -40,7 +40,7 @@ export async function upsertDevices(projectId, items) {
 
     const rows = [];
 
-    // 1) bulk по id — прежняя логика
+    // 1) bulk UPSERT по id
     if (withId.length) {
         const values = [];
         const params = [];
@@ -49,71 +49,78 @@ export async function upsertDevices(projectId, items) {
         for (const d of withId) {
             const groupId =
                 "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
+
             values.push(
-                `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, $${i++}, now(), false)`
+                `($${i++}::uuid, $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb)`
             );
             params.push(
-                d.id || null, // id
-                projectId, // project_id
-                groupId || null, // group_id
-                d.name ?? null, // name
-                metaToJson(d.meta) // meta
+                d.id,               // id
+                projectId,          // project_id (оставляем прежний проект)
+                groupId || null,    // group_id
+                d.name ?? null,     // name
+                metaToJson(d.meta)  // meta
             );
         }
 
         const sql = `
-            INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
-            VALUES ${values.join(",")}
+            INSERT INTO devices (id, project_id, group_id, name, meta)
+            VALUES ${values.join(", ")}
                 ON CONFLICT (id) DO UPDATE SET
-                project_id = EXCLUDED.project_id,
-                                        group_id   = EXCLUDED.group_id,
-                                        name       = COALESCE(EXCLUDED.name, devices.name),
-                                        meta       = COALESCE(EXCLUDED.meta, devices.meta),
-                                        updated_at = now(),
-                                        is_deleted = false
-                                        RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted;
+                group_id   = EXCLUDED.group_id,
+                                        name       = EXCLUDED.name,
+                                        meta       = EXCLUDED.meta,
+                                        is_deleted = FALSE,
+                                        updated_at = NOW()
+                                        RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
         `;
+
         const res = await query(sql, params);
         rows.push(...res.rows);
     }
 
-    // 2) идемпотентная обработка без id — один UPSERT по частичному индексу
-    for (const d of noId) {
-        const groupId =
-            "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
-        const metaJson = metaToJson(d.meta);
-        // room_id из meta должен присутствовать, чтобы корректно сработал уникальный ключ
-        // (если его нет, всё равно выполняем INSERT — индекс не задействуется)
+    // 2) bulk INSERT для записей без id — всегда создаём новое устройство
+    if (noId.length) {
+        const values = [];
+        const params = [];
+        let i = 1;
+
+        for (const d of noId) {
+            const groupId =
+                "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
+
+            values.push(
+                `(uuid_generate_v4(), $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, NOW(), FALSE)`
+            );
+            params.push(
+                projectId,          // project_id
+                groupId || null,    // group_id
+                d.name ?? null,     // name
+                metaToJson(d.meta)  // meta
+            );
+        }
+
         const sql = `
       INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
-      VALUES (uuid_generate_v4(), $1, $2, $3, $4, now(), false)
-      ON CONFLICT ON CONSTRAINT ux_devices_project_room_name_alive
-      DO UPDATE SET
-        group_id   = COALESCE(EXCLUDED.group_id, devices.group_id),
-        name       = COALESCE(EXCLUDED.name, devices.name),
-        meta       = COALESCE(EXCLUDED.meta, devices.meta),
-        updated_at = now(),
-        is_deleted = false
+      VALUES ${values.join(", ")}
       RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
     `;
-        const ins = await query(sql, [
-            projectId,
-            groupId || null,
-            d.name ?? null,
-            metaJson,
-        ]);
-        rows.push(ins.rows[0]);
+
+        const res = await query(sql, params);
+        rows.push(...res.rows);
     }
 
     return rows;
 }
 
+/**
+ * Мягкое удаление по списку id.
+ */
 export async function deleteDevices(projectId, ids) {
     if (!ids?.length) return [];
     const res = await query(
         `UPDATE devices
-         SET is_deleted = true,
-             updated_at = now()
+         SET is_deleted = TRUE,
+             updated_at = NOW()
          WHERE project_id = $1
            AND id = ANY($2::uuid[])
              RETURNING id`,
@@ -124,8 +131,7 @@ export async function deleteDevices(projectId, ids) {
 
 /**
  * Дельта устройств.
- * Фикс: используем updated_at >= since (вместо >), чтобы не терять запись
- * при равенстве меток времени.
+ * Используем updated_at >= since, чтобы не терять запись при равенстве меток.
  */
 export async function deltaDevices(projectId, sinceIso) {
     const res = await query(
@@ -139,12 +145,31 @@ export async function deltaDevices(projectId, sinceIso) {
     return res.rows;
 }
 
+/**
+ * Все устройства проекта (без фильтра).
+ */
 export async function getDevicesByProject(projectId) {
     const res = await query(
-        `SELECT id, group_id, name, meta, updated_at, is_deleted
+        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
          FROM devices
          WHERE project_id = $1`,
         [projectId]
+    );
+    return res.rows;
+}
+
+/**
+ * Поиск по имени (регистронезависимый) — всегда массив.
+ * Если нужны "contains", можно заменить условие на LIKE/ILIKE.
+ */
+export async function getDevicesByNameCI(projectId, name) {
+    const res = await query(
+        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
+       FROM devices
+      WHERE project_id = $1
+        AND is_deleted = FALSE
+        AND lower(name) = lower($2)`,
+        [projectId, name]
     );
     return res.rows;
 }
