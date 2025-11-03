@@ -2,8 +2,9 @@ import { query } from "../db/pool.js";
 
 /**
  * Гарантирует существование дефолтных групп (__default__) для набора roomIds.
- * Идемпотентно: частичный уникальный индекс ux_groups_project_room_default
- * обеспечивает отсутствие дублей и гонок.
+ * Идемпотентно за счёт частичного уникального индекса:
+ *   ux_groups_project_room_default (project_id, room_id)
+ *   WHERE is_deleted = FALSE AND name = '__default__'
  * Возвращает Map(roomId -> groupId).
  */
 export async function ensureDefaultGroups(projectId, roomIds) {
@@ -11,23 +12,23 @@ export async function ensureDefaultGroups(projectId, roomIds) {
 
     const res = await query(
         `
-        WITH ids AS (
-            SELECT DISTINCT UNNEST($1::uuid[]) AS room_id
-        ),
-        up AS (
+            WITH ids AS (
+                SELECT DISTINCT UNNEST($1::uuid[]) AS room_id
+            ),
+                 up AS (
             INSERT INTO public."groups"(id, project_id, room_id, name, meta, updated_at, is_deleted)
             SELECT uuid_generate_v4(), $2::uuid, i.room_id, '__default__', NULL, now(), FALSE
             FROM ids i
-            ON CONFLICT (project_id, room_id) WHERE (name = '__default__')
-            DO UPDATE SET updated_at = now(), is_deleted = FALSE
-            RETURNING id, room_id
-        )
-        SELECT g.id, g.room_id
-        FROM public."groups" g
-        JOIN ids i ON i.room_id = g.room_id
-        WHERE g.project_id = $2
-          AND g.name = '__default__'
-          AND g.is_deleted = FALSE;
+                ON CONFLICT ON CONSTRAINT ux_groups_project_room_default
+                DO UPDATE SET updated_at = now(), is_deleted = FALSE
+                       RETURNING id, room_id
+                       )
+            SELECT g.id, g.room_id
+            FROM public."groups" g
+                     JOIN ids i ON i.room_id = g.room_id
+            WHERE g.project_id = $2
+              AND g.name = '__default__'
+              AND g.is_deleted = FALSE;
         `,
         [roomIds, projectId]
     );
@@ -59,14 +60,14 @@ export async function upsertGroups(projectId, items) {
     const sql = `
         INSERT INTO groups (id, project_id, room_id, name, meta, updated_at, is_deleted)
         VALUES ${values.join(",")}
-        ON CONFLICT (id) DO UPDATE SET
+            ON CONFLICT (id) DO UPDATE SET
             project_id = EXCLUDED.project_id,
-            room_id    = EXCLUDED.room_id,
-            name       = COALESCE(EXCLUDED.name, groups.name),
-            meta       = COALESCE(EXCLUDED.meta, groups.meta),
-            updated_at = now(),
-            is_deleted = false
-        RETURNING id, project_id, room_id, name, meta, updated_at, is_deleted;
+                                    room_id    = EXCLUDED.room_id,
+                                    name       = COALESCE(EXCLUDED.name, groups.name),
+                                    meta       = COALESCE(EXCLUDED.meta, groups.meta),
+                                    updated_at = now(),
+                                    is_deleted = false
+                                    RETURNING id, project_id, room_id, name, meta, updated_at, is_deleted;
     `;
     const res = await query(sql, params);
     return res.rows;
@@ -100,7 +101,7 @@ export async function getGroupsByProject(projectId) {
     const res = await query(
         `SELECT g.id, g.room_id, g.name, g.meta, g.updated_at, g.is_deleted
          FROM groups g
-         JOIN rooms r ON r.id = g.room_id AND r.is_deleted = FALSE
+                  JOIN rooms r ON r.id = g.room_id AND r.is_deleted = FALSE
          WHERE g.project_id = $1
            AND g.is_deleted = FALSE`,
         [projectId]
