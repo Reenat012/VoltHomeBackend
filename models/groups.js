@@ -12,11 +12,11 @@ export async function upsertGroups(projectId, items) {
             `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, $${i++}, now(), false)`
         );
         params.push(
-            g.id || null,               // id
-            projectId,                  // project_id
-            g.roomId || null,           // room_id  <-- ВАЖНО: сохраняем связь с комнатой
-            g.name,                     // name
-            g.meta ? JSON.stringify(g.meta) : null // meta
+            g.id || null,                               // id
+            projectId,                                  // project_id
+            g.roomId || null,                           // room_id
+            g.name ?? null,                             // name
+            g.meta ? JSON.stringify(g.meta) : null      // meta
         );
     }
 
@@ -46,14 +46,15 @@ export async function deleteGroups(projectId, ids) {
              RETURNING id`,
         [projectId, ids]
     );
-    return res.rows.map(r => r.id);
+    return res.rows.map((r) => r.id);
 }
 
 export async function deltaGroups(projectId, sinceIso) {
     const res = await query(
         `SELECT id, project_id, room_id, name, meta, updated_at, is_deleted
          FROM groups
-         WHERE project_id = $1 AND updated_at >= $2   -- было '>'
+         WHERE project_id = $1
+           AND updated_at >= $2
          ORDER BY updated_at ASC`,
         [projectId, sinceIso]
     );
@@ -62,9 +63,12 @@ export async function deltaGroups(projectId, sinceIso) {
 
 export async function getGroupsByProject(projectId) {
     const res = await query(
-        `SELECT id, room_id, name, meta, updated_at, is_deleted
-         FROM groups
-         WHERE project_id = $1`,
+        `SELECT g.id, g.room_id, g.name, g.meta, g.updated_at, g.is_deleted
+         FROM groups g
+                  JOIN rooms r ON r.id = g.room_id
+             AND r.is_deleted = FALSE
+         WHERE g.project_id = $1
+           AND g.is_deleted = FALSE`,
         [projectId]
     );
     return res.rows;

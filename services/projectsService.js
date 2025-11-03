@@ -114,9 +114,9 @@ export async function getDelta({ userId, projectId, since }) {
  * - Аудит выносим ВНЕ транзакции и делаем best-effort (не роняет батч).
  *
  * ВАЖНО:
- *  - upsertRooms/Groups/Devices вызываем как (projectId, items) — без userId
- *  - если UPDATE projects ничего не вернул — newVersion = meta.version + 1
- */
+ *  - Порядок: сначала DELETE (дети -> родители), затем UPSERT (родители -> дети).
+ *  - Сигнатуры upsert/delete* не менялись.
+*/
 export async function applyBatch({ userId, projectId, baseVersion, ops }) {
     const meta = await getProjectMeta({ userId, projectId });
     if (!meta) return { notFound: true };
@@ -127,14 +127,15 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
     await query("BEGIN");
     let newVersion = meta.version + 1;
     try {
-        // LWW: апсерты перезаписывают, delete ставит tombstone.
-        if (ops?.rooms?.upsert?.length)  await upsertRooms(projectId, ops.rooms.upsert);
-        if (ops?.groups?.upsert?.length) await upsertGroups(projectId, ops.groups.upsert);
-        if (ops?.devices?.upsert?.length) await upsertDevices(projectId, ops.devices.upsert);
-
-        if (ops?.rooms?.delete?.length)  await deleteRooms(projectId, ops.rooms.delete);
-        if (ops?.groups?.delete?.length) await deleteGroups(projectId, ops.groups.delete);
+        // 1) СНАЧАЛА DELETE (дети → родители), чтобы исключить "воскрешения"
         if (ops?.devices?.delete?.length) await deleteDevices(projectId, ops.devices.delete);
+        if (ops?.groups?.delete?.length)  await deleteGroups(projectId, ops.groups.delete);
+        if (ops?.rooms?.delete?.length)   await deleteRooms(projectId, ops.rooms.delete);
+
+        // 2) ПОТОМ UPSERT (родители → дети)
+        if (ops?.rooms?.upsert?.length)   await upsertRooms(projectId, ops.rooms.upsert);
+        if (ops?.groups?.upsert?.length)  await upsertGroups(projectId, ops.groups.upsert);
+        if (ops?.devices?.upsert?.length) await upsertDevices(projectId, ops.devices.upsert);
 
         const verRes = await query(
             `UPDATE projects
@@ -148,12 +149,12 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
         if (stale) {
             const reason = "Stale baseVersion; server wins (LWW)";
             const items = [
-                ...(ops?.rooms?.upsert  || []).map((x) => ["rooms", x.id]),
-                ...(ops?.groups?.upsert || []).map((x) => ["groups", x.id]),
-                ...(ops?.devices?.upsert|| []).map((x) => ["devices", x.id]),
-                ...(ops?.rooms?.delete  || []).map((id) => ["rooms", id]),
-                ...(ops?.groups?.delete || []).map((id) => ["groups", id]),
-                ...(ops?.devices?.delete|| []).map((id) => ["devices", id]),
+                ...(ops?.rooms?.upsert   || []).map((x) => ["rooms",   x.id]),
+                ...(ops?.groups?.upsert  || []).map((x) => ["groups",  x.id]),
+                ...(ops?.devices?.upsert || []).map((x) => ["devices", x.id]),
+                ...(ops?.rooms?.delete   || []).map((id) => ["rooms",   id]),
+                ...(ops?.groups?.delete  || []).map((id) => ["groups",  id]),
+                ...(ops?.devices?.delete || []).map((id) => ["devices", id]),
             ];
             for (const [entity, id] of items) conflicts.push(conflict(reason, entity, id));
         }
@@ -175,12 +176,12 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
                 baseVersion,
                 newVersion,
                 counts: {
-                    roomsUpsert:  ops?.rooms?.upsert?.length   || 0,
-                    roomsDelete:  ops?.rooms?.delete?.length   || 0,
-                    groupsUpsert: ops?.groups?.upsert?.length  || 0,
-                    groupsDelete: ops?.groups?.delete?.length  || 0,
-                    devicesUpsert:ops?.devices?.upsert?.length || 0,
-                    devicesDelete:ops?.devices?.delete?.length || 0,
+                    roomsUpsert:   ops?.rooms?.upsert?.length   || 0,
+                    roomsDelete:   ops?.rooms?.delete?.length   || 0,
+                    groupsUpsert:  ops?.groups?.upsert?.length  || 0,
+                    groupsDelete:  ops?.groups?.delete?.length  || 0,
+                    devicesUpsert: ops?.devices?.upsert?.length || 0,
+                    devicesDelete: ops?.devices?.delete?.length || 0,
                 },
             },
         });

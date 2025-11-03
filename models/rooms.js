@@ -35,10 +35,10 @@ export async function upsertRooms(projectId, items) {
                 `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, now(), false)`
             );
             params.push(
-                r.id || null, // id
-                projectId, // project_id
-                r.name ?? null, // name
-                metaToJson(r.meta) // meta
+                r.id || null,            // id
+                projectId,               // project_id
+                r.name ?? null,          // name
+                metaToJson(r.meta)       // meta
             );
         }
 
@@ -63,16 +63,16 @@ export async function upsertRooms(projectId, items) {
         const metaJson = metaToJson(r.meta);
 
         const sql = `
-      INSERT INTO rooms (id, project_id, name, meta, updated_at, is_deleted)
-      VALUES (uuid_generate_v4(), $1, $2, $3, now(), false)
-      ON CONFLICT ON CONSTRAINT ux_rooms_project_name_alive
-      DO UPDATE SET
-        name       = COALESCE(EXCLUDED.name, rooms.name),
-        meta       = COALESCE(EXCLUDED.meta, rooms.meta),
-        updated_at = now(),
-        is_deleted = false
-      RETURNING id, project_id, name, meta, updated_at, is_deleted
-    `;
+            INSERT INTO rooms (id, project_id, name, meta, updated_at, is_deleted)
+            VALUES (uuid_generate_v4(), $1, $2, $3, now(), false)
+                ON CONFLICT ON CONSTRAINT ux_rooms_project_name_alive
+                DO UPDATE SET
+                name       = COALESCE(EXCLUDED.name, rooms.name),
+                       meta       = COALESCE(EXCLUDED.meta, rooms.meta),
+                       updated_at = now(),
+                       is_deleted = false
+                       RETURNING id, project_id, name, meta, updated_at, is_deleted
+        `;
         const ins = await query(sql, [projectId, name, metaJson]);
         rows.push(ins.rows[0]);
     }
@@ -112,7 +112,8 @@ export async function getRoomsByProject(projectId) {
     const res = await query(
         `SELECT id, name, meta, updated_at, is_deleted
          FROM rooms
-         WHERE project_id = $1`,
+         WHERE project_id = $1
+           AND is_deleted = FALSE`,
         [projectId]
     );
     return res.rows;

@@ -48,14 +48,14 @@ export async function upsertDevices(projectId, items) {
 
         for (const d of withId) {
             const groupId =
-                "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
+                "groupId" in d ? d.groupId : ("group_id" in d ? d.group_id : null);
 
             values.push(
                 `($${i++}::uuid, $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb)`
             );
             params.push(
                 d.id,               // id
-                projectId,          // project_id (оставляем прежний проект)
+                projectId,          // project_id
                 groupId || null,    // group_id
                 d.name ?? null,     // name
                 metaToJson(d.meta)  // meta
@@ -65,13 +65,13 @@ export async function upsertDevices(projectId, items) {
         const sql = `
             INSERT INTO devices (id, project_id, group_id, name, meta)
             VALUES ${values.join(", ")}
-                ON CONFLICT (id) DO UPDATE SET
+            ON CONFLICT (id) DO UPDATE SET
                 group_id   = EXCLUDED.group_id,
-                                        name       = EXCLUDED.name,
-                                        meta       = EXCLUDED.meta,
-                                        is_deleted = FALSE,
-                                        updated_at = NOW()
-                                        RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
+                name       = EXCLUDED.name,
+                meta       = EXCLUDED.meta,
+                is_deleted = FALSE,
+                updated_at = NOW()
+            RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
         `;
 
         const res = await query(sql, params);
@@ -86,7 +86,7 @@ export async function upsertDevices(projectId, items) {
 
         for (const d of noId) {
             const groupId =
-                "groupId" in d ? d.groupId : "group_id" in d ? d.group_id : null;
+                "groupId" in d ? d.groupId : ("group_id" in d ? d.group_id : null);
 
             values.push(
                 `(uuid_generate_v4(), $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, NOW(), FALSE)`
@@ -100,10 +100,10 @@ export async function upsertDevices(projectId, items) {
         }
 
         const sql = `
-      INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
-      VALUES ${values.join(", ")}
-      RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
-    `;
+            INSERT INTO devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
+            VALUES ${values.join(", ")}
+            RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
+        `;
 
         const res = await query(sql, params);
         rows.push(...res.rows);
@@ -123,7 +123,7 @@ export async function deleteDevices(projectId, ids) {
              updated_at = NOW()
          WHERE project_id = $1
            AND id = ANY($2::uuid[])
-             RETURNING id`,
+         RETURNING id`,
         [projectId, ids]
     );
     return res.rows.map((r) => r.id);
@@ -146,13 +146,18 @@ export async function deltaDevices(projectId, sinceIso) {
 }
 
 /**
- * Все устройства проекта (без фильтра).
+ * Все устройства проекта (только живые, с живой группой и живой комнатой).
  */
 export async function getDevicesByProject(projectId) {
     const res = await query(
-        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
-         FROM devices
-         WHERE project_id = $1`,
+        `SELECT d.id, d.project_id, d.group_id, d.name, d.meta, d.updated_at, d.is_deleted
+           FROM devices d
+           JOIN groups g ON g.id = d.group_id
+                        AND g.is_deleted = FALSE
+           JOIN rooms  r ON r.id = g.room_id
+                        AND r.is_deleted = FALSE
+          WHERE d.project_id = $1
+            AND d.is_deleted = FALSE`,
         [projectId]
     );
     return res.rows;
@@ -160,15 +165,14 @@ export async function getDevicesByProject(projectId) {
 
 /**
  * Поиск по имени (регистронезависимый) — всегда массив.
- * Если нужны "contains", можно заменить условие на LIKE/ILIKE.
  */
 export async function getDevicesByNameCI(projectId, name) {
     const res = await query(
         `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
-       FROM devices
-      WHERE project_id = $1
-        AND is_deleted = FALSE
-        AND lower(name) = lower($2)`,
+           FROM devices
+          WHERE project_id = $1
+            AND is_deleted = FALSE
+            AND lower(name) = lower($2)`,
         [projectId, name]
     );
     return res.rows;
