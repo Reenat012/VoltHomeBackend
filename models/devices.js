@@ -145,3 +145,28 @@ export async function deleteDevices(projectId, ids) {
     );
     return res.rows.map((r) => r.id);
 }
+
+/** Дельта устройств (updated_at >= since) */
+export async function deltaDevices(projectId, sinceIso) {
+    const res = await query(
+        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
+         FROM devices
+         WHERE project_id = $1
+           AND updated_at >= $2
+         ORDER BY updated_at ASC`,
+        [projectId, sinceIso]
+    );
+    return res.rows;
+}
+
+/** Живые устройства проекта */
+export async function getDevicesByProject(projectId) {
+    const res = await query(
+        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
+         FROM devices
+         WHERE project_id = $1
+           AND is_deleted = FALSE`,
+        [projectId]
+    );
+    return res.rows;
+}
