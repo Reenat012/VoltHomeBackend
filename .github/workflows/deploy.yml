@@ -30,44 +30,49 @@ jobs:
             TS="$(date +%Y%m%d%H%M%S)"
             RELEASE_DIR="$RELEASES_DIR/$TS"
 
-            echo "[1/7] prepare directories"
+            echo "[1/8] prepare directories"
             mkdir -p "$RELEASES_DIR"
             cd "$SERVER_PATH"
 
-            echo "[2/7] fetch repo"
+            echo "[2/8] fetch repo"
             git fetch --all --prune
 
-            echo "[3/7] export clean tree to $RELEASE_DIR"
+            echo "[3/8] export clean tree to $RELEASE_DIR"
             mkdir -p "$RELEASE_DIR"
             # экспорт только отслеживаемых файлов (без .git, без старых node_modules)
             git archive origin/main | tar -x -C "$RELEASE_DIR"
 
-            echo "[4/7] install production deps (local npm cache)"
+            echo "[3.5/8] sync .env into new release (dotenv/config needs it)"
+            if [ -f "$SERVER_PATH/.env" ]; then
+              cp "$SERVER_PATH/.env" "$RELEASE_DIR/.env"
+              echo "  - .env copied into release"
+            else
+              echo "  ! WARNING: $SERVER_PATH/.env not found; app may fail DB check"
+            fi
+
+            echo "[4/8] install production deps (local npm cache)"
             cd "$RELEASE_DIR"
             export NODE_ENV=production
             export npm_config_cache="$RELEASE_DIR/.npm-cache"
             mkdir -p "$npm_config_cache"
             npm ci --omit=dev --no-audit --no-fund
 
-            echo "[5/7] symlink switch to new release"
+            echo "[5/8] symlink switch to new release"
             ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 
-            echo "[6/7] pm2 start/reload (stable)"
+            echo "[6/8] pm2 start/reload (stable)"
             export PM2_HOME="/home/${{ secrets.SERVER_USER }}/.pm2"
             export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-            # показать версии для диагностики (не обязательно)
             /usr/bin/pm2 -v || true
             /usr/bin/node -v || true
 
-            # гарантируем живой демон (не перезапускаем его вручную)
+            # гарантируем живой демон
             /usr/bin/pm2 ping >/dev/null 2>&1 || /usr/bin/pm2 resurrect >/dev/null 2>&1 || true
 
             if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
-              # reload без --cwd (reload его не принимает), только обновление окружения
               /usr/bin/pm2 reload volthome-api --update-env
             else
-              # первый запуск: задаём cwd и entrypoint ОДИН РАЗ
               /usr/bin/pm2 start "$CURRENT_LINK/server/server.js" \
                 --name volthome-api \
                 --cwd "$CURRENT_LINK" \
@@ -76,7 +81,10 @@ jobs:
             /usr/bin/pm2 save || true
             /usr/bin/pm2 ls || true
 
-            echo "[7/7] healthcheck + keep 5 releases"
+            echo "[7/8] healthcheck + diagnostics + keep 5 releases"
+            # быстрые проверки слушающего порта (диагностика)
+            (ss -tulpn 2>/dev/null | grep ':3000' || true)
+
             # healthcheck (30 попыток по 1с)
             for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:3000/health >/dev/null; then
@@ -88,9 +96,11 @@ jobs:
             done
 
             if ! curl -fsS http://127.0.0.1:3000/health >/dev/null; then
-              echo "healthcheck failed, printing pm2 status/logs ⬇️"
+              echo "healthcheck failed, printing pm2 + app logs ⬇️"
               /usr/bin/pm2 ls || true
-              /usr/bin/pm2 logs --lines 200 || true
+              # вывести именно логи приложения
+              tail -n 200 "/home/${{ secrets.SERVER_USER }}/.pm2/logs/volthome-api-error.log" 2>/dev/null || true
+              tail -n 200 "/home/${{ secrets.SERVER_USER }}/.pm2/logs/volthome-api-out.log"   2>/dev/null || true
               # жёсткий перезапуск (fallback)
               /usr/bin/pm2 delete volthome-api || true
               /usr/bin/pm2 start "$CURRENT_LINK/server/server.js" --name volthome-api --cwd "$CURRENT_LINK" --time
