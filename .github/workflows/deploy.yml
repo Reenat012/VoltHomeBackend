@@ -2,52 +2,63 @@ name: Deploy to Timeweb
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (optional)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.SERVER_HOST }}         # 147.45.185.209
-          username: ${{ secrets.SERVER_USER }}     # deploy
-          key: ${{ secrets.SSH_PRIVATE_KEY }}      # приватный ключ (без пароля)
+          host: ${{ secrets.SERVER_HOST }}          # напр. 147.45.185.209
+          username: ${{ secrets.SERVER_USER }}      # напр. deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}       # приватный ключ без пароля
           port: 22
           envs: SERVER_PATH
           script_stop: true
           script: |
             set -euo pipefail
-            SERVER_PATH="${{ secrets.SERVER_PATH }}"   # /var/www/VoltHomeBackend
-            
+
+            SERVER_PATH="${{ secrets.SERVER_PATH }}"   # напр. /var/www/VoltHomeBackend
+
             echo "[1/6] goto $SERVER_PATH"
             cd "$SERVER_PATH"
-            
+
             echo "[2/6] git fetch & hard reset to origin/main"
             git fetch --all --prune
             git reset --hard origin/main
-            
-            echo "[3/6] install deps (production only)"
+
+            echo "[3/6] fix permissions & clean node_modules (no sudo)"
+            chmod -R u+rwX node_modules || true
+            rm -rf node_modules package-lock.json || true
+
+            echo "[3.1/6] prepare npm cache"
+            mkdir -p "$HOME/.npm"
+            chmod -R u+rwX "$HOME/.npm"
+            npm config set cache "$HOME/.npm" --global
+
+            echo "[3.2/6] install deps (production only)"
+            export NODE_ENV=production
             npm ci --omit=dev
-            
+
             echo "[4/6] pm2 start/reload (absolute path + PM2_HOME)"
-            export PM2_HOME=/home/${{ secrets.SERVER_USER }}/.pm2
+            export PM2_HOME="/home/${{ secrets.SERVER_USER }}/.pm2"
             export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-            
+
             if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
               /usr/bin/pm2 reload volthome-api
             else
               /usr/bin/pm2 start server/server.js --name volthome-api
             fi
-            /usr/bin/pm2 save
-            
+            /usr/bin/pm2 save || true
+
             echo "[5/6] healthcheck with retry"
-            for i in {1..30}; do
+            for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:3000/health >/dev/null; then
                 echo "health OK on try $i ✅"
                 break
@@ -55,13 +66,12 @@ jobs:
               echo "waiting app to become healthy... ($i/30)"
               sleep 1
             done
-            
-            # если после 30 попыток все еще нет /health — показать логи и упасть
+
             if ! curl -fsS http://127.0.0.1:3000/health >/dev/null; then
               echo "healthcheck failed, printing pm2 status/logs ⬇️"
               /usr/bin/pm2 ls || true
-              /usr/bin/pm2 logs --lines 100 || true
+              /usr/bin/pm2 logs --lines 200 || true
               exit 1
             fi
-            
+
             echo "[6/6] done ✅"
