@@ -12,7 +12,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy over SSH
+      - name: Deploy over SSH (atomic releases)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.SERVER_HOST }}          # напр. 147.45.185.209
@@ -25,39 +25,46 @@ jobs:
             set -euo pipefail
 
             SERVER_PATH="${{ secrets.SERVER_PATH }}"   # напр. /var/www/VoltHomeBackend
+            RELEASES_DIR="$SERVER_PATH/releases"
+            CURRENT_LINK="$SERVER_PATH/current"
+            TS="$(date +%Y%m%d%H%M%S)"
+            RELEASE_DIR="$RELEASES_DIR/$TS"
 
-            echo "[1/6] goto $SERVER_PATH"
+            echo "[1/7] prepare directories"
+            mkdir -p "$RELEASES_DIR"
             cd "$SERVER_PATH"
 
-            echo "[2/6] git fetch & hard reset to origin/main"
+            echo "[2/7] fetch repo"
             git fetch --all --prune
-            git reset --hard origin/main
 
-            echo "[3/6] fix permissions & clean node_modules (no sudo)"
-            chmod -R u+rwX node_modules || true
-            rm -rf node_modules package-lock.json || true
+            echo "[3/7] export clean tree to $RELEASE_DIR"
+            mkdir -p "$RELEASE_DIR"
+            # экспортируем только отслеживаемые файлы, без .git и без старого node_modules
+            git archive origin/main | tar -x -C "$RELEASE_DIR"
 
-            echo "[3.1/6] prepare npm cache"
-            mkdir -p "$HOME/.npm"
-            chmod -R u+rwX "$HOME/.npm"
-            npm config set cache "$HOME/.npm" --global
-
-            echo "[3.2/6] install deps (production only)"
+            echo "[4/7] install production deps (local npm cache)"
+            cd "$RELEASE_DIR"
             export NODE_ENV=production
-            npm ci --omit=dev
+            export npm_config_cache="$RELEASE_DIR/.npm-cache"
+            mkdir -p "$npm_config_cache"
+            # дополнительные флаги, чтобы ускорить и убрать лишние обращения в сеть
+            npm ci --omit=dev --no-audit --no-fund
 
-            echo "[4/6] pm2 start/reload (absolute path + PM2_HOME)"
+            echo "[5/7] symlink switch to new release"
+            ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
+
+            echo "[6/7] pm2 start/reload with cwd=current"
             export PM2_HOME="/home/${{ secrets.SERVER_USER }}/.pm2"
             export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-
             if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
-              /usr/bin/pm2 reload volthome-api
+              /usr/bin/pm2 reload volthome-api --update-env --cwd "$CURRENT_LINK"
             else
-              /usr/bin/pm2 start server/server.js --name volthome-api
+              /usr/bin/pm2 start "$CURRENT_LINK/server/server.js" --name volthome-api --cwd "$CURRENT_LINK"
             fi
             /usr/bin/pm2 save || true
 
-            echo "[5/6] healthcheck with retry"
+            echo "[7/7] healthcheck + keep 5 releases"
+            # healthcheck
             for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:3000/health >/dev/null; then
                 echo "health OK on try $i ✅"
@@ -74,4 +81,7 @@ jobs:
               exit 1
             fi
 
-            echo "[6/6] done ✅"
+            # оставить только 5 последних релизов
+            ls -1dt "$RELEASES_DIR"/* | tail -n +6 | xargs -r rm -rf
+
+            echo "✅ deploy finished: $RELEASE_DIR"
