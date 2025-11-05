@@ -170,3 +170,19 @@ export async function getDevicesByProject(projectId) {
     );
     return res.rows;
 }
+
+/** Поиск устройств по имени (case-insensitive) в рамках проекта и комнаты */
+export async function getDevicesByNameCI(projectId, roomId, name) {
+    const res = await query(
+        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
+         FROM devices
+         WHERE project_id = $1
+           AND (meta->>'room_id') = $2
+           AND lower(name) = lower($3)
+           AND is_deleted = FALSE
+         ORDER BY updated_at DESC
+         LIMIT 200`,
+        [projectId, roomId, name]
+    );
+    return res.rows;
+}
