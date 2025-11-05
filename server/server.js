@@ -9,6 +9,15 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
+// 🔹 Глобальные хэндлеры, чтобы не терять важные ошибки ранней инициализации
+process.on("unhandledRejection", (reason, p) => {
+    console.error("[unhandledRejection]", reason);
+});
+process.on("uncaughtException", (err) => {
+    console.error("[uncaughtException]", err);
+    // по желанию — мягкое завершение с прерыванием при повторе
+});
+
 // ВАЖНО: из server/ к роутам идём на уровень выше
 import projectsRouter from "../routes/projects.js";
 import authRouter from "../routes/auth.js";
