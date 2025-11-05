@@ -11,9 +11,12 @@ function metaToJson(meta) {
  *
  * Поведение:
  * - Если r.id задан — обычный LWW по id (bulk INSERT ... ON CONFLICT (id) DO UPDATE).
- * - Если r.id отсутствует — ИДЕМПОТЕНТНЫЙ UPSERT одной командой:
- *   INSERT ... ON CONFLICT ON CONSTRAINT ux_rooms_project_name_alive DO UPDATE
- *   (требуется уникальный индекс на (project_id, lower(name)) WHERE is_deleted=false).
+ * - Если r.id отсутствует — идемпотентный UPDATE-или-INSERT без ON CONSTRAINT:
+ *   1) ищем «живую» комнату по (project_id, lower(name)),
+ *   2) если есть — UPDATE (возврат обновлённой строки),
+ *   3) если нет — INSERT новой.
+ *
+ * Это снимает потребность в частичном уникальном индексе и устраняет 42P10.
  */
 export async function upsertRooms(projectId, items) {
     if (!items?.length) return [];
@@ -24,7 +27,7 @@ export async function upsertRooms(projectId, items) {
 
     const rows = [];
 
-    // 1) Bulk по id
+    // 1) Bulk по id (LWW)
     if (withId.length) {
         const values = [];
         const params = [];
@@ -35,10 +38,10 @@ export async function upsertRooms(projectId, items) {
                 `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, now(), false)`
             );
             params.push(
-                r.id || null,            // id
-                projectId,               // project_id
-                r.name ?? null,          // name
-                metaToJson(r.meta)       // meta
+                r.id || null,        // id
+                projectId,           // project_id
+                r.name ?? null,      // name
+                metaToJson(r.meta)   // meta
             );
         }
 
@@ -57,21 +60,32 @@ export async function upsertRooms(projectId, items) {
         rows.push(...res.rows);
     }
 
-    // 2) Идемпотентно без id — один UPSERT по уникальному частичному индексу
+    // 2) Идемпотентно без id — UPDATE-или-INSERT без частичного уникального индекса
     for (const r of noId) {
         const name = r.name ?? null;
         const metaJson = metaToJson(r.meta);
 
         const sql = `
+            WITH existing AS (
+                SELECT id
+                FROM rooms
+                WHERE project_id = $1
+                  AND lower(name) = lower($2)
+                  AND is_deleted = false
+                LIMIT 1
+                ), updated AS (
+            UPDATE rooms AS rm
+            SET name       = COALESCE($2, rm.name),
+                meta       = COALESCE($3, rm.meta),
+                updated_at = now(),
+                is_deleted = false
+            WHERE rm.id IN (SELECT id FROM existing)
+                RETURNING rm.id, rm.project_id, rm.name, rm.meta, rm.updated_at, rm.is_deleted
+                )
             INSERT INTO rooms (id, project_id, name, meta, updated_at, is_deleted)
-            VALUES (uuid_generate_v4(), $1, $2, $3, now(), false)
-                ON CONFLICT ON CONSTRAINT ux_rooms_project_name_alive
-                DO UPDATE SET
-                name       = COALESCE(EXCLUDED.name, rooms.name),
-                       meta       = COALESCE(EXCLUDED.meta, rooms.meta),
-                       updated_at = now(),
-                       is_deleted = false
-                       RETURNING id, project_id, name, meta, updated_at, is_deleted
+            SELECT uuid_generate_v4(), $1, $2, $3, now(), false
+                WHERE NOT EXISTS (SELECT 1 FROM updated)
+      RETURNING id, project_id, name, meta, updated_at, is_deleted;
         `;
         const ins = await query(sql, [projectId, name, metaJson]);
         rows.push(ins.rows[0]);
