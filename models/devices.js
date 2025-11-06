@@ -25,38 +25,60 @@ function extractRoomId(meta) {
  * Апсерт устройств:
  * - если прислан group_id — используем его;
  * - если нет group_id, но есть meta.room_id — создаём/находим дефолтную группу комнаты;
- * - если нет ни group_id, ни meta.room_id — сохраняем как «сироту» (group_id = NULL).
+ * - если нет ни group_id, ни meta.room_id — сохраняем с group_id = NULL.
+ *
+ * ДОБАВЛЕНО:
+ * - Валидация: каждый meta.room_id обязан принадлежать projectId. Иначе кидаем 422 (ROOM_PROJECT_MISMATCH).
+ * - Для записей БЕЗ id — всегда INSERT (gen_random_uuid()).
  */
 export async function upsertDevices(projectId, items) {
     if (!items?.length) return [];
 
-    // 1) собрать комнаты для дефолтных групп
-    const roomIdsNeedingDefault = [];
-    for (const d of items) {
-        const hasGroupId = ("groupId" in d && d.groupId) || ("group_id" in d && d.group_id);
-        if (!hasGroupId) {
-            const rid = extractRoomId(d.meta);
-            if (rid) roomIdsNeedingDefault.push(rid);
+    // Собираем room_id из meta
+    const roomIds = Array.from(new Set(
+        items.map(d => extractRoomId(d.meta)).filter(Boolean)
+    ));
+
+    // Валидируем, что все room_id принадлежат проекту
+    if (roomIds.length) {
+        const { rows } = await query(
+            `SELECT id FROM rooms
+             WHERE project_id = $1
+               AND id = ANY($2::uuid[])
+               AND is_deleted = FALSE`,
+            [projectId, roomIds]
+        );
+        const ok = new Set(rows.map(r => r.id));
+        const bad = roomIds.filter(id => !ok.has(id));
+        if (bad.length) {
+            const err = new Error(`room_id не принадлежит проекту: ${bad.join(", ")}`);
+            err.status = 422;
+            err.expose = true;
+            err.code = "ROOM_PROJECT_MISMATCH";
+            throw err;
         }
     }
 
-    // 2) гарантируем дефолтные группы
+    // Гарантируем дефолтные группы под задействованные комнаты
     let defaultMap = new Map();
-    if (roomIdsNeedingDefault.length) {
-        defaultMap = await ensureDefaultGroups(projectId, roomIdsNeedingDefault);
+    if (roomIds.length) {
+        try {
+            defaultMap = await ensureDefaultGroups(projectId, roomIds);
+        } catch {
+            defaultMap = new Map();
+        }
     }
 
-    // 3) нормализуем group_id и раскладываем по "с id" / "без id"
+    // Нормализуем и раскладываем по “с id” / “без id”
     const withId = [];
     const noId = [];
     for (const d of items) {
-        const groupId =
+        const incomingGroupId =
             ("groupId" in d && d.groupId) ? d.groupId
-                : (("group_id" in d && d.group_id) ? d.group_id
-                    : (() => {
-                        const rid = extractRoomId(d.meta);
-                        return rid ? (defaultMap.get(rid) || null) : null;
-                    })());
+                : (("group_id" in d && d.group_id) ? d.group_id : null);
+
+        const rid = extractRoomId(d.meta);
+        const groupId = incomingGroupId ?? (rid ? (defaultMap.get(rid) || null) : null);
 
         const norm = {
             ...d,
@@ -69,7 +91,7 @@ export async function upsertDevices(projectId, items) {
 
     const rows = [];
 
-    // 4) bulk UPSERT с id
+    // 1) bulk UPSERT с id (LWW по id, в рамках project_id)
     if (withId.length) {
         const values = [];
         const params = [];
@@ -92,18 +114,20 @@ export async function upsertDevices(projectId, items) {
             INSERT INTO devices (id, project_id, group_id, name, meta)
             VALUES ${values.join(", ")}
                 ON CONFLICT (id) DO UPDATE SET
-                group_id   = EXCLUDED.group_id,
+                project_id = EXCLUDED.project_id,
+                                        group_id   = EXCLUDED.group_id,
                                         name       = EXCLUDED.name,
                                         meta       = EXCLUDED.meta,
                                         is_deleted = FALSE,
                                         updated_at = NOW()
+                                    WHERE devices.project_id = EXCLUDED.project_id
                                         RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted
         `;
         const res = await query(sql, params);
         rows.push(...res.rows);
     }
 
-    // 5) bulk INSERT без id — безопасный фолбэк: gen_random_uuid() (pgcrypto)
+    // 2) INSERT без id — новая запись
     if (noId.length) {
         const values = [];
         const params = [];
@@ -181,7 +205,7 @@ export async function getDevicesByNameCI(projectId, roomId, name) {
            AND lower(name) = lower($3)
            AND is_deleted = FALSE
          ORDER BY updated_at DESC
-         LIMIT 200`,
+             LIMIT 200`,
         [projectId, roomId, name]
     );
     return res.rows;

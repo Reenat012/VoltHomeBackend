@@ -65,3 +65,22 @@ export async function query(text, params) {
         throw err;
     }
 }
+
+/**
+ * Реальная транзакция на ОДНОМ соединении.
+ * Все запросы внутри fn(client) выполняйте через client.query(...)
+ */
+export async function withTransaction(fn) {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        const res = await fn(client);
+        await client.query("COMMIT");
+        return res;
+    } catch (e) {
+        try { await client.query("ROLLBACK"); } catch {}
+        throw e;
+    } finally {
+        client.release();
+    }
+}

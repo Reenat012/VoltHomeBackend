@@ -1,6 +1,6 @@
 // routes/projects.js
 import express from "express";
-import crypto from "crypto";
+// import crypto from "crypto"; // не используется
 import { authMiddleware } from "../utils/jwt.js";
 import {
     createProject,
@@ -38,7 +38,7 @@ router.get("/", async (req, res) => {
     }
 });
 
-/** POST /v1/projects — создать проект (как раньше: допускает id?, name, note?) */
+/** POST /v1/projects — создать проект (допускает id?, name, note?) */
 router.post("/", async (req, res) => {
     const uid = req.user.uid;
     const { id, name, note } = req.body || {};
@@ -56,7 +56,7 @@ router.post("/", async (req, res) => {
     }
 });
 
-/** GET /v1/projects/:id — как РАНЬШЕ: возвращает snapshot TREE */
+/** GET /v1/projects/:id — snapshot TREE */
 router.get("/:id", async (req, res) => {
     const uid = req.user.uid;
     const id = req.params.id;
@@ -164,7 +164,30 @@ router.post("/:id/batch", async (req, res) => {
         return res.json(result);
     } catch (err) {
         const isTimeout = err?.code === "57014" || /statement timeout/i.test(err?.message || "");
-        console.error("[POST /v1/projects/:id/batch] error:", err?.message || err, "| code:", err?.code);
+        console.error(
+            "[POST /v1/projects/:id/batch] error:",
+            err?.message || err,
+            "| code:", err?.code,
+            "| detail:", err?.detail,
+            "| constraint:", err?.constraint,
+            "| table:", err?.table
+        );
+
+        // 1) Пробрасываем прикладные ошибки из моделей (например, ROOM_PROJECT_MISMATCH)
+        if (err?.expose && err?.status) {
+            return res.status(err.status).json({
+                error: err.code || "invalid_request",
+                message: err.message
+            });
+        }
+
+        // 2) PG → человеко-понятные 4xx
+        const pg = err?.code;
+        if (pg === "23503") return res.status(422).json({ error: "fk_violation", detail: err?.detail, constraint: err?.constraint });
+        if (pg === "23505") return res.status(409).json({ error: "unique_violation", detail: err?.detail, constraint: err?.constraint });
+        if (pg === "23502") return res.status(422).json({ error: "not_null", detail: err?.detail, column: err?.column });
+        if (pg === "22P02") return res.status(400).json({ error: "bad_value", detail: err?.detail });
+
         return res.status(isTimeout ? 503 : 500).json({ error: isTimeout ? "db_timeout" : "server_error" });
     }
 });
