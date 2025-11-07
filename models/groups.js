@@ -14,7 +14,11 @@ function extractRoomIdNullable(obj) {
     const m = obj.meta;
     if (!m) return null;
     if (typeof m === "string") {
-        try { return JSON.parse(m)?.room_id ?? null; } catch { return null; }
+        try {
+            return JSON.parse(m)?.room_id ?? null;
+        } catch {
+            return null;
+        }
     }
     return m?.room_id ?? null;
 }
@@ -26,9 +30,8 @@ function uniq(arr) {
 
 /**
  * Гарантирует существование дефолтных групп (__default__) для набора roomIds.
- * Идемпотентно за счёт частичного уникального индекса:
- *   ux_groups_project_room_default (project_id, room_id)
- *   WHERE is_deleted = FALSE AND name = '__default__'
+ * ВАЖНО: не используем ON CONFLICT ON CONSTRAINT (частичного уникального констрейнта может не быть).
+ * Вставляем только отсутствующие через LEFT JOIN ... WHERE g.id IS NULL.
  * Возвращает Map(roomId -> groupId).
  */
 export async function ensureDefaultGroups(projectId, roomIds) {
@@ -37,23 +40,27 @@ export async function ensureDefaultGroups(projectId, roomIds) {
 
     const res = await query(
         `
-        WITH ids AS (
-            SELECT DISTINCT UNNEST($1::uuid[]) AS room_id
-        ),
-        up AS (
+            WITH ids AS (
+                SELECT DISTINCT UNNEST($1::uuid[]) AS room_id
+            ),
+                 ins AS (
             INSERT INTO public."groups"(id, project_id, room_id, name, meta, updated_at, is_deleted)
             SELECT uuid_generate_v4(), $2::uuid, i.room_id, '__default__', NULL, now(), FALSE
             FROM ids i
-            ON CONFLICT ON CONSTRAINT ux_groups_project_room_default
-            DO UPDATE SET updated_at = now(), is_deleted = FALSE
-            RETURNING id, room_id
-        )
-        SELECT g.id, g.room_id
-        FROM public."groups" g
-        JOIN ids i ON i.room_id = g.room_id
-        WHERE g.project_id = $2
-          AND g.name = '__default__'
-          AND g.is_deleted = FALSE;
+                     LEFT JOIN public."groups" g
+                               ON g.project_id = $2::uuid
+       AND g.room_id    = i.room_id
+       AND g.name       = '__default__'
+       AND g.is_deleted = FALSE
+            WHERE g.id IS NULL
+                RETURNING id, room_id
+                )
+            SELECT g.id, g.room_id
+            FROM public."groups" g
+                     JOIN ids i ON i.room_id = g.room_id
+            WHERE g.project_id = $2::uuid
+      AND g.name = '__default__'
+      AND g.is_deleted = FALSE;
         `,
         [rooms, projectId]
     );
@@ -65,7 +72,7 @@ export async function ensureDefaultGroups(projectId, roomIds) {
 
 /**
  * BULK upsert групп.
- * - если передан id: INSERT ... ON CONFLICT(id) DO UPDATE (LWW по id)
+ * - если передан id: INSERT ... ON CONFLICT(id) DO UPDATE (LWW по id в рамках project_id)
  * - если id нет: генерируем его через uuid_generate_v4()
  * Поля:
  *   - roomId | room_id (оба принимаются)
@@ -84,26 +91,26 @@ export async function upsertGroups(projectId, items) {
             `(COALESCE($${i++}::uuid, uuid_generate_v4()), $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, now(), FALSE)`
         );
         params.push(
-            g.id || null,                 // id (или сгенерим)
-            projectId,                    // project_id
-            roomId,                       // room_id
-            g.name ?? null,               // name
-            metaToJson(g.meta)            // meta (jsonb|null)
+            g.id || null,          // id (или сгенерим)
+            projectId,             // project_id
+            roomId,                // room_id
+            g.name ?? null,        // name
+            metaToJson(g.meta)     // meta (jsonb|null)
         );
     }
 
     const sql = `
         INSERT INTO public."groups" (id, project_id, room_id, name, meta, updated_at, is_deleted)
         VALUES ${values.join(",")}
-        ON CONFLICT (id) DO UPDATE SET
+            ON CONFLICT (id) DO UPDATE SET
             project_id = EXCLUDED.project_id,
-            room_id    = EXCLUDED.room_id,
-            name       = COALESCE(EXCLUDED.name, "groups".name),
-            meta       = COALESCE(EXCLUDED.meta, "groups".meta),
-            updated_at = now(),
-            is_deleted = FALSE
-        WHERE "groups".project_id = EXCLUDED.project_id
-        RETURNING id, project_id, room_id, name, meta, updated_at, is_deleted;
+                                    room_id    = EXCLUDED.room_id,
+                                    name       = COALESCE(EXCLUDED.name, "groups".name),
+                                    meta       = COALESCE(EXCLUDED.meta, "groups".meta),
+                                    updated_at = now(),
+                                    is_deleted = FALSE
+                                WHERE "groups".project_id = EXCLUDED.project_id
+                                    RETURNING id, project_id, room_id, name, meta, updated_at, is_deleted;
     `;
     const res = await query(sql, params);
     return res.rows;
@@ -116,7 +123,7 @@ export async function deleteGroups(projectId, ids) {
         `UPDATE public."groups"
          SET is_deleted = TRUE, updated_at = now()
          WHERE project_id = $1 AND id = ANY($2::uuid[])
-         RETURNING id`,
+             RETURNING id`,
         [projectId, ids]
     );
     return res.rows.map((r) => r.id);
@@ -140,9 +147,9 @@ export async function getGroupsByProject(projectId) {
     const res = await query(
         `SELECT g.id, g.room_id, g.name, g.meta, g.updated_at, g.is_deleted
          FROM public."groups" g
-         JOIN public.rooms r
-           ON r.id = g.room_id
-          AND r.is_deleted = FALSE
+                  JOIN public.rooms r
+                       ON r.id = g.room_id
+                           AND r.is_deleted = FALSE
          WHERE g.project_id = $1
            AND g.is_deleted = FALSE`,
         [projectId]
