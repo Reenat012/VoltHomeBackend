@@ -32,7 +32,7 @@ NODE_ENV=production node server/server.js
 # или
 npm run dev
 
-Важные файлы
+### Важные файлы
 	•	server/server.js — конфигурация Express и маршрутов.
 	•	routes/*.js — HTTP эндпоинты.
 	•	services/projectsService.js — агрегирующая бизнес-логика по проектам.
@@ -40,7 +40,7 @@ npm run dev
 	•	db/pool.js — пул подключений к PostgreSQL.
 	•	utils/jwt.js — работа с JWT.
 
-Архитектурные тезисы
+### Архитектурные тезисы
 	•	Проект — единица синхронизации с версией version.
 	•	Batch — атомарная операция с набором upsert/delete для rooms, groups, devices.
 	•	Soft-delete: is_deleted = true + updated_at = now(). Каскады через триггеры.
@@ -406,8 +406,3 @@ EOF
 - **FK/каскады**: подтверждены и документированы триггеры soft-каскада (`soft_cascade_from_rooms`, `soft_cascade_from_groups`) и строгие внешние ключи с `ON DELETE CASCADE`.
 - **Документация**: добавлены файлы `docs/Auth.md`, `docs/API.md`, `docs/Batch.md`, `docs/DB.md`, `docs/Debug.md`, обновлён `README.md`.
 - **Сессии**: в `server/models/sessions.js` исправлён расчёт хеша refresh-токена на `sha256Hex` (HEX-строка).
-
-
-⸻
-
-если нужно — могу разбить это на коммиты с путями (куда положить каждый файл) или адаптировать под ваш текущий формат wiki в репо.
