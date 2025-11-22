@@ -58,3 +58,18 @@ export async function softDeleteProject({ userId, projectId }) {
     );
     return res.rows[0] || null;
 }
+
+/**
+ * Считает количество "живых" проектов пользователя.
+ * Используем is_deleted IS NOT TRUE, чтобы быть устойчивыми к NULL.
+ */
+export async function countAliveProjectsForUser({ userId }) {
+    const res = await query(
+        `SELECT COUNT(*)::int AS count
+         FROM projects
+         WHERE user_id = $1
+           AND (is_deleted IS NOT TRUE)`,
+        [userId]
+    );
+    return res.rows[0]?.count ?? 0;
+}

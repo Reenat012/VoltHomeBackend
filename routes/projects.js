@@ -8,13 +8,19 @@ import {
     getProjectMeta,
     updateProjectMeta,
     softDeleteProject,
+    countAliveProjectsForUser,
 } from "../models/projects.js";
 import { getProjectTree, getDelta, applyBatch } from "../services/projectsService.js";
 import { isUuidV4, requiredString, optionalString, isIsoDate, parseLimit } from "../utils/validation.js";
 // ❗ Если в models/devices.js реально есть эти экспорты — оставь, иначе УДАЛИ импорт, чтобы не сваливалась загрузка модуля
 // import { getDevicesByProject, getDevicesByNameCI, upsertDevices, deleteDevices } from "../models/devices.js";
+import { getActiveSubscriptionForUser } from "../models/subscriptions.js";
 
 const router = express.Router();
+
+// Максимальное количество проектов для free-пользователя.
+// Можно переопределить через переменную окружения FREE_PROJECT_LIMIT.
+const FREE_PROJECT_LIMIT = Number(process.env.FREE_PROJECT_LIMIT || "3");
 
 // Все ручки требуют Bearer
 router.use(authMiddleware);
@@ -40,15 +46,62 @@ router.get("/", async (req, res) => {
 
 /** POST /v1/projects — создать проект (допускает id?, name, note?) */
 router.post("/", async (req, res) => {
-    const uid = req.user.uid;
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: "invalid_token" });
+
     const { id, name, note } = req.body || {};
     if (id && !isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
     if (!requiredString(name, 200)) return res.status(400).json({ error: "invalid_name" });
     if (!optionalString(note, 2000)) return res.status(400).json({ error: "invalid_note" });
 
     try {
+        // 1. Определяем план пользователя по подписке (pro/free).
+        // Любая ошибка чтения подписки не должна ломать создание проекта — считаем пользователя free.
+        let plan = "free";
+
+        try {
+            const sub = await getActiveSubscriptionForUser(uid);
+            if (
+                sub &&
+                ["ACTIVE", "TRIAL", "GRACE"].includes(sub.status) &&
+                (!sub.period_end_at || sub.period_end_at > new Date())
+            ) {
+                plan = "pro";
+            }
+        } catch (subErr) {
+            console.error(
+                "[POST /v1/projects] subscription check error:",
+                subErr?.message || subErr
+            );
+            plan = "free";
+        }
+
+        // 2. Если пользователь free — проверяем лимит проектов.
+        if (plan === "free") {
+            const count = await countAliveProjectsForUser({ userId: uid });
+            if (count >= FREE_PROJECT_LIMIT) {
+                return res.status(402).json({
+                    error: "pro_required_projects_limit",
+                    limit: FREE_PROJECT_LIMIT,
+                });
+            }
+        }
+
+        // 3. Лимит не превышен или пользователь PRO — создаём проект.
         const row = await createProject({ id, userId: uid, name, note });
-        try { await req.app.locals?.audit?.(uid, "create_project", "projects", row.id, { name, note }); } catch {}
+
+        try {
+            await req.app.locals?.audit?.(
+                uid,
+                "create_project",
+                "projects",
+                row.id,
+                { name, note }
+            );
+        } catch {
+            // аудит не должен ломать основной поток
+        }
+
         return res.status(201).json(row);
     } catch (err) {
         console.error("[POST /v1/projects] error:", err?.message || err, "| code:", err?.code);
@@ -156,9 +209,15 @@ router.post("/:id/batch", async (req, res) => {
         try {
             const opsCount =
                 ops && typeof ops === "object"
-                    ? Object.values(ops).reduce((n, v) => n + (v?.upsert?.length || 0) + (v?.delete?.length || 0), 0)
+                    ? Object.values(ops).reduce(
+                        (n, v) => n + (v?.upsert?.length || 0) + (v?.delete?.length || 0),
+                        0
+                    )
                     : 0;
-            await req.app.locals?.audit?.(uid, "apply_batch", "projects", id, { baseVersion, opsCount });
+            await req.app.locals?.audit?.(uid, "apply_batch", "projects", id, {
+                baseVersion,
+                opsCount,
+            });
         } catch {}
 
         return res.json(result);
@@ -167,28 +226,53 @@ router.post("/:id/batch", async (req, res) => {
         console.error(
             "[POST /v1/projects/:id/batch] error:",
             err?.message || err,
-            "| code:", err?.code,
-            "| detail:", err?.detail,
-            "| constraint:", err?.constraint,
-            "| table:", err?.table
+            "| code:",
+            err?.code,
+            "| detail:",
+            err?.detail,
+            "| constraint:",
+            err?.constraint,
+            "| table:",
+            err?.table
         );
 
         // 1) Пробрасываем прикладные ошибки из моделей (например, ROOM_PROJECT_MISMATCH)
         if (err?.expose && err?.status) {
             return res.status(err.status).json({
                 error: err.code || "invalid_request",
-                message: err.message
+                message: err.message,
             });
         }
 
         // 2) PG → человеко-понятные 4xx
         const pg = err?.code;
-        if (pg === "23503") return res.status(422).json({ error: "fk_violation", detail: err?.detail, constraint: err?.constraint });
-        if (pg === "23505") return res.status(409).json({ error: "unique_violation", detail: err?.detail, constraint: err?.constraint });
-        if (pg === "23502") return res.status(422).json({ error: "not_null", detail: err?.detail, column: err?.column });
-        if (pg === "22P02") return res.status(400).json({ error: "bad_value", detail: err?.detail });
+        if (pg === "23503")
+            return res.status(422).json({
+                error: "fk_violation",
+                detail: err?.detail,
+                constraint: err?.constraint,
+            });
+        if (pg === "23505")
+            return res.status(409).json({
+                error: "unique_violation",
+                detail: err?.detail,
+                constraint: err?.constraint,
+            });
+        if (pg === "23502")
+            return res.status(422).json({
+                error: "not_null",
+                detail: err?.detail,
+                column: err?.column,
+            });
+        if (pg === "22P02")
+            return res.status(400).json({
+                error: "bad_value",
+                detail: err?.detail,
+            });
 
-        return res.status(isTimeout ? 503 : 500).json({ error: isTimeout ? "db_timeout" : "server_error" });
+        return res
+            .status(isTimeout ? 503 : 500)
+            .json({ error: isTimeout ? "db_timeout" : "server_error" });
     }
 });
 
