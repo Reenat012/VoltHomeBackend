@@ -21,8 +21,9 @@ process.on("uncaughtException", (err) => {
 // ВАЖНО: из server/ к роутам идём на уровень выше
 import projectsRouter from "../routes/projects.js";
 import authRouter from "../routes/auth.js";
-import { pool } from "../db/pool.js";
 import profileRouter from "../routes/profile.js";
+import { router as billingRouter } from "../routes/billing.js";
+import { pool } from "../db/pool.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,9 +43,14 @@ const httpsRedirectDisabled =
 if (!httpsRedirectDisabled) {
     app.use((req, res, next) => {
         // За прокси признак HTTPS приходит в X-Forwarded-Proto
-        const xfp = (req.headers["x-forwarded-proto"] || "").toString().toLowerCase();
+        const xfp = (req.headers["x-forwarded-proto"] || "")
+            .toString()
+            .toLowerCase();
         if (xfp === "http") {
-            return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
+            return res.redirect(
+                301,
+                `https://${req.headers.host}${req.originalUrl}`
+            );
         }
         next();
     });
@@ -99,6 +105,7 @@ app.locals.audit = async () => {};
 app.use("/v1/projects", projectsRouter);
 app.use("/v1/auth", authRouter);
 app.use("/v1/profile", profileRouter);
+app.use("/v1/billing", billingRouter);
 
 /** ---------------- Swagger UI ---------------- */
 const openapiPath = path.join(__dirname, "../docs/openapi.yaml");
@@ -145,11 +152,16 @@ function withTimeout(promise, ms) {
 }
 
 async function assertDbIsUp() {
-    const maskedHost = (process.env.PGHOST || "").replace(/(^[^.]{2})[^@.]*/g, "$1***");
+    const maskedHost = (process.env.PGHOST || "").replace(
+        /(^[^.]{2})[^@.]*/g,
+        "$1***"
+    );
     const sslMode = (process.env.PGSSLMODE || "disable").toLowerCase();
     try {
         await withTimeout(pool.query("SELECT 1"), 5000);
-        console.log(`✅ DB connection ok (host=${maskedHost || "?"}, sslmode=${sslMode})`);
+        console.log(
+            `✅ DB connection ok (host=${maskedHost || "?"}, sslmode=${sslMode})`
+        );
     } catch (e) {
         console.error(
             `❌ DB connection failed (host=${maskedHost || "?"}, sslmode=${sslMode}):`,
