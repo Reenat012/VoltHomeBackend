@@ -13,79 +13,180 @@ const {
 } = process.env;
 
 /**
+ * Маскирование чувствительных значений для логов.
+ */
+function maskValue(value) {
+    if (!value) return "null";
+    if (value.length <= 4) return `***${value}`;
+    if (value.length <= 8) return `${value.slice(0, 1)}***${value.slice(-2)}`;
+    return `${value.slice(0, 3)}***${value.slice(-4)}`;
+}
+
+/**
+ * Унифицированный service-лог.
+ */
+function logService(level, marker, operation, billingTraceId, outcome, extra) {
+    const parts = [
+        marker,
+        `op=${operation}`,
+        `billingTraceId=${billingTraceId}`,
+    ];
+
+    if (outcome) {
+        parts.push(`outcome=${outcome}`);
+    }
+
+    if (extra) {
+        parts.push(extra);
+    }
+
+    const message = parts.join(" ");
+
+    if (level === "error") {
+        console.error(message);
+    } else if (level === "warn") {
+        console.warn(message);
+    } else {
+        console.log(message);
+    }
+}
+
+/**
  * Верификация покупки в RuStore.
  *
  * На Этапе 1:
  *  - если RUSTORE_VERIFY_STUB === "true" → считаем все покупки валидными на 30 дней;
  *  - иначе бросаем ошибку, чтобы не было "тихого" перехода в прод без реализации.
- *
- * @param {object} params
- * @param {string} params.userId
- * @param {string} params.productId
- * @param {string} params.orderId
- * @param {string} params.purchaseToken
- * @returns {Promise<{ ok: boolean, status?: string, periodEndAt?: Date, error?: string }>}
  */
-export async function verifyRustorePurchase({ userId, productId, orderId, purchaseToken }) {
-    if (RUSTORE_VERIFY_STUB === "true") {
-        // Dev-режим: эмулируем успешную покупку с периодом 30 дней
-        const now = new Date();
-        const periodEndAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+export async function verifyRustorePurchase({
+                                                userId,
+                                                productId,
+                                                orderId,
+                                                purchaseToken,
+                                                billingTraceId = "verify-no-trace",
+                                            }) {
+    logService(
+        "log",
+        "BEGIN",
+        "verifyRustorePurchase",
+        billingTraceId,
+        null,
+        [
+            `stubMode=${RUSTORE_VERIFY_STUB}`,
+            `userId=${maskValue(userId)}`,
+            `productId=${maskValue(productId)}`,
+            `orderId=${maskValue(orderId)}`,
+            `purchaseToken=${maskValue(purchaseToken)}`,
+        ].join(", ")
+    );
 
-        return {
-            ok: true,
-            status: "ACTIVE",
-            periodEndAt,
-        };
+    let finalOutcome = "VERIFY_FAILED";
+
+    try {
+        if (RUSTORE_VERIFY_STUB === "true") {
+            // Dev-режим: эмулируем успешную покупку с периодом 30 дней.
+            const now = new Date();
+            const periodEndAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            finalOutcome = "VERIFY_STUB_OK";
+
+            return {
+                ok: true,
+                status: "ACTIVE",
+                periodEndAt,
+            };
+        }
+
+        finalOutcome = "VERIFY_REAL_NOT_IMPLEMENTED";
+        throw new Error("verifyRustorePurchase: real RuStore API call is not implemented yet");
+    } finally {
+        logService(
+            finalOutcome === "VERIFY_STUB_OK" ? "log" : "warn",
+            "END",
+            "verifyRustorePurchase",
+            billingTraceId,
+            finalOutcome
+        );
     }
-
-    // TODO: Реализовать реальный вызов RuStore API согласно документации.
-    // Здесь намеренно бросаем ошибку, чтобы не было "тихого" использования в проде
-    // без корректной интеграции с RuStore.
-    throw new Error("verifyRustorePurchase: real RuStore API call is not implemented yet");
 }
 
 /**
  * Высокоуровневая операция "подтвердить покупку RuStore и обновить подписку".
- *
- * Этап 1:
- *  - вызывает verifyRustorePurchase (dev-стаб),
- *  - при ok=true делает апсерт в таблицу subscriptions,
- *  - возвращает нормализованный результат (ok, subscription, plan...).
- *
- * @param {object} params
- * @param {string} params.userId
- * @param {string} params.productId
- * @param {string} params.orderId
- * @param {string} params.purchaseToken
- * @returns {Promise<{ ok: boolean, subscription?: object, error?: string }>}
  */
-export async function confirmRustorePurchase({ userId, productId, orderId, purchaseToken }) {
-    const verification = await verifyRustorePurchase({
-        userId,
-        productId,
-        orderId,
-        purchaseToken,
-    });
+export async function confirmRustorePurchase({
+                                                 userId,
+                                                 productId,
+                                                 orderId,
+                                                 purchaseToken,
+                                                 billingTraceId = "confirm-no-trace",
+                                             }) {
+    logService(
+        "log",
+        "BEGIN",
+        "confirmRustorePurchase",
+        billingTraceId,
+        null,
+        [
+            `userId=${maskValue(userId)}`,
+            `productId=${maskValue(productId)}`,
+            `orderId=${maskValue(orderId)}`,
+            `purchaseToken=${maskValue(purchaseToken)}`,
+        ].join(", ")
+    );
 
-    if (!verification.ok) {
+    let finalOutcome = "CONFIRM_FAILED";
+
+    try {
+        const verification = await verifyRustorePurchase({
+            userId,
+            productId,
+            orderId,
+            purchaseToken,
+            billingTraceId,
+        });
+
+        if (!verification.ok) {
+            finalOutcome = verification.error || "VERIFICATION_FAILED";
+
+            return {
+                ok: false,
+                error: verification.error || "verification_failed",
+            };
+        }
+
+        const subscription = await upsertSubscriptionFromRustore(
+            {
+                userId,
+                productId,
+                orderId,
+                purchaseToken,
+                status: verification.status || "ACTIVE",
+                periodEndAt: verification.periodEndAt || null,
+            },
+            {
+                billingTraceId,
+            }
+        )
+
+        finalOutcome = "UPSERT_OK"
+
         return {
-            ok: false,
-            error: verification.error || "verification_failed",
+            ok: true,
+            subscription,
         };
+    } catch (e) {
+        console.error(
+            `MID op=confirmRustorePurchase billingTraceId=${billingTraceId} errorClass=${e?.constructor?.name} errorMessage=${e?.message}`,
+            e
+        );
+        throw e;
+    } finally {
+        logService(
+            finalOutcome === "UPSERT_OK" ? "log" : "warn",
+            "END",
+            "confirmRustorePurchase",
+            billingTraceId,
+            finalOutcome
+        );
     }
-
-    const subscription = await upsertSubscriptionFromRustore({
-        userId,
-        productId,
-        orderId,
-        purchaseToken,
-        status: verification.status || "ACTIVE",
-        periodEndAt: verification.periodEndAt || null,
-    });
-
-    return {
-        ok: true,
-        subscription,
-    };
 }

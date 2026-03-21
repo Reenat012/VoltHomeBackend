@@ -3,7 +3,6 @@ import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
 import {
     getActiveSubscriptionForUser,
-    upsertSubscriptionFromRustore,
     derivePlanFromSubscription,
 } from "../models/subscriptions.js";
 import { confirmRustorePurchase } from "../services/rustoreBillingService.js";
@@ -11,30 +10,87 @@ import { confirmRustorePurchase } from "../services/rustoreBillingService.js";
 const router = express.Router();
 
 /**
+ * Локальный backend trace id для billing-логов.
+ * Commit 1: это отдельный backend trace, не client purchaseFlowId.
+ */
+function newBillingTraceId(prefix = "billing") {
+    return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Маскирование чувствительных значений для логов.
+ */
+function maskValue(value) {
+    if (!value) return "null";
+    if (value.length <= 4) return `***${value}`;
+    if (value.length <= 8) return `${value.slice(0, 1)}***${value.slice(-2)}`;
+    return `${value.slice(0, 3)}***${value.slice(-4)}`;
+}
+
+/**
+ * Унифицированный route-лог.
+ */
+function logRoute(level, marker, operation, billingTraceId, outcome, extra) {
+    const parts = [
+        marker,
+        `op=${operation}`,
+        `billingTraceId=${billingTraceId}`,
+    ];
+
+    if (outcome) {
+        parts.push(`outcome=${outcome}`);
+    }
+
+    if (extra) {
+        parts.push(extra);
+    }
+
+    const message = parts.join(" ");
+
+    if (level === "error") {
+        console.error(message);
+    } else if (level === "warn") {
+        console.warn(message);
+    } else {
+        console.log(message);
+    }
+}
+
+/**
  * GET /v1/billing/status
  *
  * Возвращает текущий план/статус подписки для авторизованного пользователя.
- *
- * Формат ответа:
- * {
- *   "plan": "free" | "pro",
- *   "status": "NONE" | "ACTIVE" | "TRIAL" | "GRACE" | ...,
- *   "productId": "volthome_pro_monthly" | null,
- *   "periodEndEpochSeconds": 1234567890 | null
- * }
- *
- * Если подписки нет или ошибка — считаем пользователя free.
  */
 router.get("/status", authMiddleware, async (req, res) => {
+    const billingTraceId = newBillingTraceId("status");
+    const userId = req.user?.uid;
+
+    logRoute(
+        "log",
+        "BEGIN",
+        "GET /v1/billing/status",
+        billingTraceId,
+        null,
+        `userId=${maskValue(userId)}`
+    );
+
+    let finalOutcome = "STATUS_INTERNAL_ERROR";
+
     try {
-        const userId = req.user?.uid;
         if (!userId) {
+            finalOutcome = "UNAUTHORIZED";
+
             return res.status(401).json({ error: "unauthorized" });
         }
 
-        const activeSub = await getActiveSubscriptionForUser(userId);
+        const activeSub = await getActiveSubscriptionForUser(userId, {
+            billingTraceId,
+        });
+
         const { plan, planUntilEpochSeconds } =
             derivePlanFromSubscription(activeSub);
+
+        finalOutcome = "STATUS_OK";
 
         return res.json({
             plan,
@@ -43,7 +99,10 @@ router.get("/status", authMiddleware, async (req, res) => {
             periodEndEpochSeconds: planUntilEpochSeconds,
         });
     } catch (e) {
-        console.error("[GET /v1/billing/status] error:", e);
+        console.error(
+            `MID op=GET /v1/billing/status billingTraceId=${billingTraceId} errorClass=${e?.constructor?.name} errorMessage=${e?.message}`,
+            e
+        );
 
         return res.status(500).json({
             plan: "free",
@@ -52,6 +111,14 @@ router.get("/status", authMiddleware, async (req, res) => {
             periodEndEpochSeconds: null,
             error: "internal_error",
         });
+    } finally {
+        logRoute(
+            finalOutcome === "STATUS_OK" ? "log" : "warn",
+            "END",
+            "GET /v1/billing/status",
+            billingTraceId,
+            finalOutcome
+        );
     }
 });
 
@@ -59,27 +126,36 @@ router.get("/status", authMiddleware, async (req, res) => {
  * POST /v1/billing/rustore/confirm
  *
  * Подтверждение покупки из RuStore.
- *
- * Ожидает в body:
- * {
- *   "productId": "volthome_pro_monthly",
- *   "orderId": "xxx",
- *   "purchaseToken": "yyy"
- * }
- *
- * В dev-режиме (RUSTORE_VERIFY_STUB=true) confirmRustorePurchase
- * сам подставляет фиктивный ACTIVE-период.
  */
 router.post("/rustore/confirm", authMiddleware, async (req, res) => {
+    const billingTraceId = newBillingTraceId("confirm");
+    const userId = req.user?.uid;
+    const { productId, orderId, purchaseToken } = req.body || {};
+
+    logRoute(
+        "log",
+        "BEGIN",
+        "POST /v1/billing/rustore/confirm",
+        billingTraceId,
+        null,
+        [
+            `userId=${maskValue(userId)}`,
+            `productId=${maskValue(productId)}`,
+            `orderId=${maskValue(orderId)}`,
+            `purchaseToken=${maskValue(purchaseToken)}`,
+        ].join(", ")
+    );
+
+    let finalOutcome = "CONFIRM_INTERNAL_ERROR";
+
     try {
-        const userId = req.user?.uid;
         if (!userId) {
+            finalOutcome = "UNAUTHORIZED";
             return res.status(401).json({ error: "unauthorized" });
         }
 
-        const { productId, orderId, purchaseToken } = req.body || {};
-
         if (!productId || !orderId || !purchaseToken) {
+            finalOutcome = "INVALID_REQUEST";
             return res.status(400).json({ ok: false, error: "invalid_request" });
         }
 
@@ -88,10 +164,13 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
             productId,
             orderId,
             purchaseToken,
+            billingTraceId,
         });
 
         if (!result.ok) {
             const status = result.httpStatus ?? 502;
+            finalOutcome = result.errorCode ?? "RUSTORE_UNAVAILABLE";
+
             return res.status(status).json({
                 ok: false,
                 error: result.errorCode ?? "rustore_unavailable",
@@ -102,6 +181,8 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
         const { plan, planUntilEpochSeconds } =
             derivePlanFromSubscription(subscription);
 
+        finalOutcome = "CONFIRM_OK";
+
         return res.json({
             ok: true,
             plan,
@@ -110,15 +191,25 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
             periodEndEpochSeconds: planUntilEpochSeconds,
         });
     } catch (e) {
-        console.error("[POST /v1/billing/rustore/confirm] error:", e);
+        console.error(
+            `MID op=POST /v1/billing/rustore/confirm billingTraceId=${billingTraceId} errorClass=${e?.constructor?.name} errorMessage=${e?.message}`,
+            e
+        );
+
         return res.status(500).json({
             ok: false,
             error: "internal_error",
         });
+    } finally {
+        logRoute(
+            finalOutcome === "CONFIRM_OK" ? "log" : "warn",
+            "END",
+            "POST /v1/billing/rustore/confirm",
+            billingTraceId,
+            finalOutcome
+        );
     }
 });
 
-// Чтобы можно было импортировать как именованный router
 export { router };
-// И как default, если где-то будешь подключать по-старому
 export default router;
