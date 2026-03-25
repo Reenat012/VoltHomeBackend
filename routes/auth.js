@@ -47,11 +47,20 @@ function nowEpochSeconds() {
     return Math.floor(Date.now() / 1000);
 }
 
-function buildSessionResponse({ accessToken, refreshToken }) {
+/**
+ * Единый ответ серверной сессии.
+ *
+ * Важно:
+ * - добавили uid без ломания старого контракта;
+ * - старые клиенты просто проигнорируют лишнее поле;
+ * - новые клиенты смогут хранить owner identity для pending confirm recovery.
+ */
+function buildSessionResponse({ accessToken, refreshToken, uid }) {
     return {
         sessionJwt: accessToken,
         expiresAtEpochSeconds: nowEpochSeconds() + ACCESS_TTL_MIN * 60, // секунды!
         refreshId: refreshToken,
+        uid,
     };
 }
 
@@ -70,18 +79,23 @@ function withTimeout(promise, ms, onTimeoutMsg = "timeout") {
 function bestName(info) {
     return info?.real_name || info?.display_name || info?.login || "Volt User";
 }
+
 function avatarUrlFrom(info, preset = "islands-200") {
     const id = info?.default_avatar_id;
     return id ? `https://avatars.yandex.net/get-yapic/${id}/${preset}` : null;
 }
+
 async function tryFetchYandexInfo(yaAccessToken) {
     if (!yaAccessToken) return null;
+
     try {
         // Node 18+ имеет глобальный fetch
         const resp = await fetch("https://login.yandex.ru/info?format=json", {
             headers: { Authorization: `OAuth ${yaAccessToken}` }
         });
+
         if (!resp.ok) return null;
+
         const json = await resp.json();
         return {
             displayName: bestName(json),
@@ -107,13 +121,18 @@ async function tryFetchYandexInfo(yaAccessToken) {
  *  - опционально yaAccessToken (access_token Яндекса) — если пришёл, сервер сам запросит профиль
  *  - опционально profile { displayName, email, avatarUrl } — если клиент уже знает профиль
  *
- * Итог: создаём refresh-сессию и сохраняем профиль в in-memory store `users`.
+ * Итог:
+ *  - создаём refresh-сессию
+ *  - сохраняем профиль в in-memory store `users`
+ *  - возвращаем session + uid
  */
 router.post("/yandex/exchange", async (req, res) => {
     const { code, uid, yaAccessToken, profile } = req.body || {};
-    if (!code && !uid) return res.status(400).json({ error: "uid_or_code_required" });
+    if (!code && !uid) {
+        return res.status(400).json({ error: "uid_or_code_required" });
+    }
 
-    // uid формируем как и прежде (совместимость)
+    // uid формируем как и прежде (совместимость текущей серверной логики)
     const userId = uid || `ya_${String(code).slice(0, 24)}`;
     const accessToken = issueAccessToken(userId);
     const refreshToken = issueRefreshToken(userId);
@@ -127,7 +146,10 @@ router.post("/yandex/exchange", async (req, res) => {
             "db_timeout"
         );
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     // --- Сохранение профиля ---
@@ -146,7 +168,7 @@ router.post("/yandex/exchange", async (req, res) => {
         if (fetched) resolvedProfile = fetched;
     }
 
-    // 3) Апсертим (с минимальными дефолтами)
+    // 3) Апсертим с минимальными дефолтами
     upsertUser(userId, {
         displayName: resolvedProfile?.displayName || "Volt User",
         email: resolvedProfile?.email ?? null,
@@ -156,10 +178,21 @@ router.post("/yandex/exchange", async (req, res) => {
         planUntilEpochSeconds: users.get(userId)?.planUntilEpochSeconds ?? null,
     });
 
-    return res.json(buildSessionResponse({ accessToken, refreshToken }));
+    return res.json(
+        buildSessionResponse({
+            accessToken,
+            refreshToken,
+            uid: userId
+        })
+    );
 });
 
-/** POST /v1/auth/session/refresh */
+/**
+ * POST /v1/auth/session/refresh
+ *
+ * Новый клиент использует именно эту ручку.
+ * Важно: uid возвращаем и здесь тоже, чтобы он не терялся после refresh.
+ */
 router.post("/session/refresh", async (req, res) => {
     const { refreshId } = req.body || {};
     if (!refreshId) return res.status(400).json({ error: "refresh_required" });
@@ -176,11 +209,15 @@ router.post("/session/refresh", async (req, res) => {
     try {
         sess = await withTimeout(getSessionByToken(refreshId), 2000, "db_timeout");
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     if (!sess) return res.status(401).json({ error: "invalid_refresh" });
     if (sess.revoked_at) return res.status(401).json({ error: "revoked" });
+
     if (new Date(sess.expires_at).getTime() < Date.now()) {
         await markRevoked(sess.id).catch(() => {});
         return res.status(401).json({ error: "expired" });
@@ -190,16 +227,30 @@ router.post("/session/refresh", async (req, res) => {
 
     try {
         await withTimeout(
-            rotateSession({ oldSessionId: sess.id, userId: sess.user_id, newRefreshToken }),
+            rotateSession({
+                oldSessionId: sess.id,
+                userId: sess.user_id,
+                newRefreshToken
+            }),
             2000,
             "db_timeout"
         );
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     const accessToken = issueAccessToken(sess.user_id);
-    return res.json(buildSessionResponse({ accessToken, refreshToken: newRefreshToken }));
+
+    return res.json(
+        buildSessionResponse({
+            accessToken,
+            refreshToken: newRefreshToken,
+            uid: sess.user_id
+        })
+    );
 });
 
 /** POST /v1/auth/session/logout */
@@ -211,7 +262,10 @@ router.post("/session/logout", async (req, res) => {
         const sess = await withTimeout(getSessionByToken(refreshId), 2000, "db_timeout");
         if (sess) await withTimeout(markRevoked(sess.id), 2000, "db_timeout");
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     return res.json({ ok: true });
@@ -219,10 +273,14 @@ router.post("/session/logout", async (req, res) => {
 
 /**
  * ============================
- *  Старые ручки (совм-ть)
+ *  Старые ручки (совместимость)
  * ============================
  */
 
+/**
+ * Legacy login.
+ * Здесь тоже возвращаем uid, чтобы поведение API было единым.
+ */
 router.post("/login", async (req, res) => {
     const { userId } = req.body || {};
     if (!userId) return res.status(400).json({ error: "user_required" });
@@ -238,15 +296,32 @@ router.post("/login", async (req, res) => {
             "db_timeout"
         );
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
-    // хотя бы дефолтный профиль, если его ещё нет
-    upsertUser(userId, { displayName: "Volt User", email: null, avatarUrl: null });
+    // Хотя бы дефолтный профиль, если его ещё нет
+    upsertUser(userId, {
+        displayName: "Volt User",
+        email: null,
+        avatarUrl: null
+    });
 
-    return res.json(buildSessionResponse({ accessToken, refreshToken }));
+    return res.json(
+        buildSessionResponse({
+            accessToken,
+            refreshToken,
+            uid: userId
+        })
+    );
 });
 
+/**
+ * Legacy refresh.
+ * Тоже возвращаем uid для полной совместимости нового клиента.
+ */
 router.post("/refresh", async (req, res) => {
     const { refreshToken } = req.body || {};
     if (!refreshToken) return res.status(400).json({ error: "refresh_required" });
@@ -263,11 +338,15 @@ router.post("/refresh", async (req, res) => {
     try {
         sess = await withTimeout(getSessionByToken(refreshToken), 2000, "db_timeout");
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     if (!sess) return res.status(401).json({ error: "invalid_refresh" });
     if (sess.revoked_at) return res.status(401).json({ error: "revoked" });
+
     if (new Date(sess.expires_at).getTime() < Date.now()) {
         await markRevoked(sess.id).catch(() => {});
         return res.status(401).json({ error: "expired" });
@@ -277,16 +356,30 @@ router.post("/refresh", async (req, res) => {
 
     try {
         await withTimeout(
-            rotateSession({ oldSessionId: sess.id, userId: sess.user_id, newRefreshToken }),
+            rotateSession({
+                oldSessionId: sess.id,
+                userId: sess.user_id,
+                newRefreshToken
+            }),
             2000,
             "db_timeout"
         );
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     const accessToken = issueAccessToken(sess.user_id);
-    return res.json(buildSessionResponse({ accessToken, refreshToken: newRefreshToken }));
+
+    return res.json(
+        buildSessionResponse({
+            accessToken,
+            refreshToken: newRefreshToken,
+            uid: sess.user_id
+        })
+    );
 });
 
 router.post("/logout", async (req, res) => {
@@ -297,7 +390,10 @@ router.post("/logout", async (req, res) => {
         const sess = await withTimeout(getSessionByToken(refreshToken), 2000, "db_timeout");
         if (sess) await withTimeout(markRevoked(sess.id), 2000, "db_timeout");
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
 
     return res.json({ ok: true });
@@ -307,8 +403,12 @@ router.post("/logout_all", authMiddleware, async (req, res) => {
     try {
         await withTimeout(revokeAllForUser(req.user.uid), 4000, "db_timeout");
     } catch (e) {
-        return res.status(503).json({ error: "server_unavailable", cause: String(e?.message || e) });
+        return res.status(503).json({
+            error: "server_unavailable",
+            cause: String(e?.message || e)
+        });
     }
+
     return res.json({ ok: true });
 });
 
