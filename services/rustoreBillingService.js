@@ -1,32 +1,32 @@
 // services/rustoreBillingService.js
-// Сервис для работы с RuStore: реальная verify-интеграция + compatibility mode.
-//
-// Commit 4A:
-// - вводим compatibility mode;
-// - real verify transport включается флагом BILLING_REAL_VERIFY_ENABLED;
-// - strict mismatch enforcement пока не включаем;
-// - старый stub оставляем только как fallback-режим;
-// - используем keyId + privateKey для получения Public-Token;
-// - verify подписки идёт через Public API V4.
+// Сервис для работы с RuStore:
+// - real verify через Public API;
+// - strict mismatch validation;
+// - hardened idempotency / conflict matrix для confirm.
 
 import crypto from "crypto";
-import { upsertSubscriptionFromRustore } from "../models/subscriptions.js";
+import {
+    findSubscriptionByOrderId,
+    findSubscriptionByPurchaseTokenHash,
+    insertSubscriptionFromRustore,
+    updateSubscriptionById,
+} from "../models/subscriptions.js";
 
 const {
-    // Новый режим Commit 4A
+    // Флаги rollout
     BILLING_REAL_VERIFY_ENABLED = "false",
     BILLING_STRICT_CONFIRM_VALIDATION_ENABLED = "false",
 
-    // Старый dev fallback оставляем, но он больше не главный переключатель
+    // Старый fallback оставляем только как аварийную совместимость
     RUSTORE_VERIFY_STUB = "true",
 
-    // Реальные параметры RuStore API
+    // Параметры RuStore API
     RUSTORE_KEY_ID,
     RUSTORE_PRIVATE_KEY,
     RUSTORE_CONSOLE_APP_ID,
     RUSTORE_PACKAGE_NAME = "ru.mugalimov.volthome",
 
-    // Отдельный флаг sandbox, чтобы не зашивать среду намертво
+    // Sandbox-флаг
     RUSTORE_USE_SANDBOX = "false",
 } = process.env;
 
@@ -87,6 +87,16 @@ function isStubMode() {
     return RUSTORE_VERIFY_STUB === "true";
 }
 
+/**
+ * Хэш токена для conflict matrix.
+ */
+function hashPurchaseToken(purchaseToken) {
+    return crypto
+        .createHash("sha256")
+        .update(String(purchaseToken), "utf8")
+        .digest("hex");
+}
+
 function requireRustoreVerifyConfig() {
     const missing = [];
 
@@ -113,7 +123,6 @@ function normalizePrivateKey(raw) {
 
     let value = String(raw).trim();
 
-    // Убираем внешние кавычки, если они есть.
     if (
         (value.startsWith('"') && value.endsWith('"')) ||
         (value.startsWith("'") && value.endsWith("'"))
@@ -121,15 +130,12 @@ function normalizePrivateKey(raw) {
         value = value.slice(1, -1);
     }
 
-    // Восстанавливаем переносы строк, если ключ записан в одну строку.
     value = value.replace(/\\n/g, "\n");
 
-    // Если это уже PEM — возвращаем как есть.
     if (value.includes("BEGIN PRIVATE KEY") || value.includes("BEGIN RSA PRIVATE KEY")) {
         return value;
     }
 
-    // Если это голый base64 — собираем PEM.
     return [
         "-----BEGIN PRIVATE KEY-----",
         value.match(/.{1,64}/g)?.join("\n") ?? value,
@@ -145,12 +151,7 @@ function makeRustoreTimestamp() {
 }
 
 /**
- * Подпись auth payload для получения Public-Token.
- *
- * ВАЖНО:
- * - сейчас используем рабочую гипотезу: подписываем строку keyId + timestamp;
- * - если RuStore вернёт Signature encode error / auth failed,
- *   будем корректировать именно этот участок, а не ломать остальную интеграцию.
+ * Подпись payload для получения Public-Token.
  */
 function signRustoreAuthPayload({ keyId, timestamp, privateKeyPem }) {
     const signer = crypto.createSign("RSA-SHA512");
@@ -284,7 +285,7 @@ async function callRustoreJson({
 }
 
 /**
- * Маппинг статуса подписки RuStore V4 в нашу доменную модель.
+ * Маппинг статуса подписки RuStore V4 в доменную модель.
  */
 function mapRustoreSubscriptionStatus(v4Body) {
     const expiryMs = Number(v4Body?.expiryTimeMillis ?? 0);
@@ -326,12 +327,94 @@ function mapRustoreSubscriptionStatus(v4Body) {
 }
 
 /**
+ * Формируем стандартный reject-ответ.
+ */
+function rejectConfirm({
+                           errorCode,
+                           httpStatus,
+                           billingTraceId,
+                           extra,
+                           rustoreResponseCode = null,
+                           rustoreMessage = null,
+                           mismatch = null,
+                       }) {
+    logService(
+        "warn",
+        "MID",
+        "confirmRustorePurchase",
+        billingTraceId,
+        errorCode,
+        extra
+    );
+
+    return {
+        ok: false,
+        error: errorCode,
+        errorCode,
+        httpStatus,
+        rustoreResponseCode,
+        rustoreMessage,
+        mismatch,
+    };
+}
+
+/**
+ * Финальная conflict matrix.
+ *
+ * Обязательные правила:
+ * - same orderId + same token + same user + same product -> IDEMPOTENT_REPLAY
+ * - same orderId + different token -> ORDER_TOKEN_MISMATCH
+ * - same orderId + different user -> ORDER_USER_MISMATCH
+ * - same orderId + different product -> ORDER_PRODUCT_MISMATCH
+ * - same token + different orderId -> TOKEN_REUSE_MISMATCH
+ */
+function evaluateConflictMatrix({
+                                    existingByOrder,
+                                    existingByToken,
+                                    userId,
+                                    productId,
+                                    orderId,
+                                    purchaseTokenHash,
+                                }) {
+    if (existingByOrder) {
+        const sameUser = existingByOrder.user_id === userId;
+        const sameProduct = existingByOrder.product_id === productId;
+        const sameToken = existingByOrder.purchase_token_hash === purchaseTokenHash;
+
+        if (sameUser && sameProduct && sameToken) {
+            return {
+                type: "IDEMPOTENT_REPLAY",
+                row: existingByOrder,
+            };
+        }
+
+        if (!sameUser) {
+            return { type: "ORDER_USER_MISMATCH" };
+        }
+
+        if (!sameProduct) {
+            return { type: "ORDER_PRODUCT_MISMATCH" };
+        }
+
+        if (!sameToken) {
+            return { type: "ORDER_TOKEN_MISMATCH" };
+        }
+    }
+
+    if (existingByToken && existingByToken.order_id !== orderId) {
+        return { type: "TOKEN_REUSE_MISMATCH" };
+    }
+
+    return { type: "NEW_CONFIRM" };
+}
+
+/**
  * Верификация покупки в RuStore.
  *
- * Commit 4A:
- * - если BILLING_REAL_VERIFY_ENABLED=false и RUSTORE_VERIFY_STUB=true → fallback stub;
- * - если BILLING_REAL_VERIFY_ENABLED=true → идём в реальный verify transport;
- * - mismatch пока только логируем, а не рубим жёстко, пока strict=false.
+ * Совместимый режим:
+ * - если real verify выключен и stub включен -> fallback stub;
+ * - если real verify включен -> идём в реальный verify transport;
+ * - mismatch между client input и RuStore response в strict режиме рубим 409.
  */
 export async function verifyRustorePurchase({
                                                 userId,
@@ -361,7 +444,6 @@ export async function verifyRustorePurchase({
     let finalOutcome = "VERIFY_FAILED";
 
     try {
-        // Fallback-режим: оставляем только как совместимую аварийную ветку.
         if (!isRealVerifyEnabled()) {
             if (isStubMode()) {
                 const now = new Date();
@@ -439,19 +521,14 @@ export async function verifyRustorePurchase({
 
         const mapped = mapRustoreSubscriptionStatus(rustoreBody);
 
-        // compatibility mode:
-        // mismatch пока только логируем.
+        // Проверяем mismatch между тем, что прислал клиент, и тем, что вернул RuStore.
         const mismatches = [];
 
         if (rustoreBody.orderId && orderId && rustoreBody.orderId !== orderId) {
             mismatches.push("ORDER_ID_MISMATCH");
         }
 
-        if (
-            rustoreBody.productId &&
-            productId &&
-            rustoreBody.productId !== productId
-        ) {
+        if (rustoreBody.productId && productId && rustoreBody.productId !== productId) {
             mismatches.push("PRODUCT_ID_MISMATCH");
         }
 
@@ -521,7 +598,8 @@ export async function verifyRustorePurchase({
 }
 
 /**
- * Высокоуровневая операция "подтвердить покупку RuStore и обновить подписку".
+ * Высокоуровневая операция:
+ * подтвердить покупку RuStore, прогнать conflict matrix и записать/обновить подписку.
  */
 export async function confirmRustorePurchase({
                                                  userId,
@@ -547,6 +625,86 @@ export async function confirmRustorePurchase({
     let finalOutcome = "CONFIRM_FAILED";
 
     try {
+        // Сначала deterministic conflict matrix по локальной БД.
+        const purchaseTokenHash = hashPurchaseToken(purchaseToken);
+
+        const existingByOrder = await findSubscriptionByOrderId(orderId, {
+            billingTraceId,
+        });
+
+        const existingByToken = await findSubscriptionByPurchaseTokenHash(purchaseTokenHash, {
+            billingTraceId,
+        });
+
+        const conflictDecision = evaluateConflictMatrix({
+            existingByOrder,
+            existingByToken,
+            userId,
+            productId,
+            orderId,
+            purchaseTokenHash,
+        });
+
+        if (conflictDecision.type === "IDEMPOTENT_REPLAY") {
+            finalOutcome = "IDEMPOTENT_REPLAY";
+
+            logService(
+                "log",
+                "MID",
+                "confirmRustorePurchase",
+                billingTraceId,
+                "IDEMPOTENT_REPLAY",
+                `orderId=${maskValue(orderId)}`
+            );
+
+            return {
+                ok: true,
+                outcomeCode: "IDEMPOTENT_REPLAY",
+                subscription: conflictDecision.row,
+            };
+        }
+
+        if (conflictDecision.type === "ORDER_USER_MISMATCH") {
+            finalOutcome = "ORDER_USER_MISMATCH";
+            return rejectConfirm({
+                errorCode: "ORDER_USER_MISMATCH",
+                httpStatus: 409,
+                billingTraceId,
+                extra: `orderId=${maskValue(orderId)}`,
+            });
+        }
+
+        if (conflictDecision.type === "ORDER_PRODUCT_MISMATCH") {
+            finalOutcome = "ORDER_PRODUCT_MISMATCH";
+            return rejectConfirm({
+                errorCode: "ORDER_PRODUCT_MISMATCH",
+                httpStatus: 409,
+                billingTraceId,
+                extra: `orderId=${maskValue(orderId)}`,
+            });
+        }
+
+        if (conflictDecision.type === "ORDER_TOKEN_MISMATCH") {
+            finalOutcome = "ORDER_TOKEN_MISMATCH";
+            return rejectConfirm({
+                errorCode: "ORDER_TOKEN_MISMATCH",
+                httpStatus: 409,
+                billingTraceId,
+                extra: `orderId=${maskValue(orderId)}`,
+            });
+        }
+
+        if (conflictDecision.type === "TOKEN_REUSE_MISMATCH") {
+            finalOutcome = "TOKEN_REUSE_MISMATCH";
+            return rejectConfirm({
+                errorCode: "TOKEN_REUSE_MISMATCH",
+                httpStatus: 409,
+                billingTraceId,
+                extra: `purchaseTokenHash=${maskValue(purchaseTokenHash)}`,
+            });
+        }
+
+        // Только после локальной conflict matrix идём в RuStore verify.
         const verification = await verifyRustorePurchase({
             userId,
             productId,
@@ -561,6 +719,7 @@ export async function confirmRustorePurchase({
             return {
                 ok: false,
                 error: verification.error || "verification_failed",
+                errorCode: verification.error || "verification_failed",
                 httpStatus: verification.httpStatus ?? 502,
                 rustoreResponseCode: verification.rustoreResponseCode ?? null,
                 rustoreMessage: verification.rustoreMessage ?? null,
@@ -582,24 +741,46 @@ export async function confirmRustorePurchase({
             ].join(", ")
         );
 
-        const subscription = await upsertSubscriptionFromRustore(
-            {
-                userId,
-                productId,
-                orderId,
-                purchaseToken,
-                status: verification.status || "ACTIVE",
-                periodEndAt: verification.periodEndAt || null,
-            },
-            {
-                billingTraceId,
-            }
-        );
+        // В NEW_CONFIRM обычно existingByOrder нет.
+        // Но если поведение когда-нибудь расширится, update оставлен безопасным и явным.
+        let subscription;
 
-        finalOutcome = "UPSERT_OK";
+        if (existingByOrder) {
+            subscription = await updateSubscriptionById(
+                existingByOrder.id,
+                {
+                    userId,
+                    productId,
+                    orderId,
+                    purchaseToken,
+                    status: verification.status || "ACTIVE",
+                    periodEndAt: verification.periodEndAt || null,
+                },
+                {
+                    billingTraceId,
+                }
+            );
+        } else {
+            subscription = await insertSubscriptionFromRustore(
+                {
+                    userId,
+                    productId,
+                    orderId,
+                    purchaseToken,
+                    status: verification.status || "ACTIVE",
+                    periodEndAt: verification.periodEndAt || null,
+                },
+                {
+                    billingTraceId,
+                }
+            );
+        }
+
+        finalOutcome = "CONFIRM_OK";
 
         return {
             ok: true,
+            outcomeCode: "CONFIRM_OK",
             subscription,
         };
     } catch (e) {
@@ -610,7 +791,9 @@ export async function confirmRustorePurchase({
         throw e;
     } finally {
         logService(
-            finalOutcome === "UPSERT_OK" ? "log" : "warn",
+            finalOutcome === "CONFIRM_OK" || finalOutcome === "IDEMPOTENT_REPLAY"
+                ? "log"
+                : "warn",
             "END",
             "confirmRustorePurchase",
             billingTraceId,

@@ -11,7 +11,7 @@ const router = express.Router();
 
 /**
  * Локальный backend trace id для billing-логов.
- * Commit 1: это отдельный backend trace, не client purchaseFlowId.
+ * Это отдельный backend trace, не client purchaseFlowId.
  */
 function newBillingTraceId(prefix = "billing") {
     return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -156,7 +156,11 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
 
         if (!productId || !orderId || !purchaseToken) {
             finalOutcome = "INVALID_REQUEST";
-            return res.status(400).json({ ok: false, error: "invalid_request" });
+            return res.status(400).json({
+                ok: false,
+                error: "invalid_request",
+                outcomeCode: "INVALID_REQUEST",
+            });
         }
 
         const result = await confirmRustorePurchase({
@@ -174,6 +178,7 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
             return res.status(status).json({
                 ok: false,
                 error: result.errorCode ?? "rustore_unavailable",
+                outcomeCode: result.errorCode ?? "RUSTORE_UNAVAILABLE",
             });
         }
 
@@ -181,10 +186,11 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
         const { plan, planUntilEpochSeconds } =
             derivePlanFromSubscription(subscription);
 
-        finalOutcome = "CONFIRM_OK";
+        finalOutcome = result.outcomeCode ?? "CONFIRM_OK";
 
         return res.json({
             ok: true,
+            outcomeCode: result.outcomeCode ?? "CONFIRM_OK",
             plan,
             status: subscription.status,
             productId: subscription.product_id,
@@ -199,10 +205,13 @@ router.post("/rustore/confirm", authMiddleware, async (req, res) => {
         return res.status(500).json({
             ok: false,
             error: "internal_error",
+            outcomeCode: "INTERNAL_ERROR",
         });
     } finally {
         logRoute(
-            finalOutcome === "CONFIRM_OK" ? "log" : "warn",
+            finalOutcome === "CONFIRM_OK" || finalOutcome === "IDEMPOTENT_REPLAY"
+                ? "log"
+                : "warn",
             "END",
             "POST /v1/billing/rustore/confirm",
             billingTraceId,
