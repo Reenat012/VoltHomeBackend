@@ -17,6 +17,16 @@ const {
     PG_STATEMENT_TIMEOUT_MS,
 } = process.env;
 
+// Защита от катастрофы: тесты стирают схему, поэтому в режиме test разрешена только локальная БД.
+if (process.env.NODE_ENV === "test") {
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (!PGHOST || !localHosts.has(PGHOST)) {
+        throw new Error(
+            `Тесты разрешены только на локальной БД (PGHOST=localhost|127.0.0.1), получено: ${PGHOST || "<пусто>"}`
+        );
+    }
+}
+
 if (!PGHOST || !PGDATABASE || !PGUSER || !PGPASSWORD) {
     throw new Error("Database config is missing. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD in .env");
 }

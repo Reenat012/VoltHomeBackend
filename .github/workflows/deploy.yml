@@ -3,9 +3,60 @@ name: Deploy to Timeweb
 on:
   push:
     branches: [ "main" ]
+  pull_request:
 
 jobs:
+  # Тесты на временной PostgreSQL. Без зелёных тестов выкладка не начинается.
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: volthome_test
+          POSTGRES_PASSWORD: volthome_test_local_only
+          POSTGRES_DB: volthome_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U volthome_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGDATABASE: volthome_test
+      PGUSER: volthome_test
+      PGPASSWORD: volthome_test_local_only
+      PGSSLMODE: disable
+      JWT_ACCESS_SECRET: test-access-secret-not-for-production
+      JWT_REFRESH_SECRET: test-refresh-secret-not-for-production
+      DISABLE_HTTPS_REDIRECT: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
   deploy:
+    needs: test
+    # Выкладываем только при push в main (не для pull request)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
