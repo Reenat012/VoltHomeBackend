@@ -3,6 +3,7 @@
 import jwt from "jsonwebtoken";
 import { randomUUID } from "node:crypto";
 import { getJwtSecrets, getAccessTtlMinutes } from "./config.js";
+import { isAccountDeleted } from "../models/accounts.js";
 
 const { access: ACCESS_SECRET, refresh: REFRESH_SECRET } = getJwtSecrets();
 
@@ -36,16 +37,25 @@ export function verifyRefreshToken(token) {
     return decoded;
 }
 
-/** Express-middleware: требует валидный Bearer <JWT> */
-export function authMiddleware(req, res, next) {
+/** Express-middleware: требует валидный Bearer <JWT> от существующего (не удалённого) аккаунта */
+export async function authMiddleware(req, res, next) {
     const h = req.header("Authorization") || "";
     const m = /^Bearer\s+(.+)$/i.exec(h);
     if (!m) return res.status(401).json({ error: "no_token" });
+    let user;
     try {
-        req.user = verifyToken(m[1]);
-        if (!req.user?.uid || typeof req.user.uid !== "string") throw new Error("no_uid");
-        next();
+        user = verifyToken(m[1]);
+        if (!user?.uid || typeof user.uid !== "string") throw new Error("no_uid");
     } catch {
         return res.status(401).json({ error: "invalid_token" });
     }
+    try {
+        // Токен выдан до удаления аккаунта: он ещё не истёк, но больше не действует
+        if (await isAccountDeleted(user.uid)) return res.status(401).json({ error: "account_deleted" });
+    } catch (e) {
+        console.error("[auth] проверка удалённого аккаунта не удалась:", e?.message || e);
+        return res.status(503).json({ error: "server_unavailable" });
+    }
+    req.user = user;
+    next();
 }

@@ -95,7 +95,7 @@ export async function createApp({ yandex, rateLimitPerMin } = {}) {
             return cb(new Error(`CORS: origin not allowed: ${origin}`), false);
         },
         methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
+        allowedHeaders: ["Content-Type", "Authorization", "X-VoltHome-Client"],
         credentials: false, // куки не используем
         optionsSuccessStatus: 204,
     };

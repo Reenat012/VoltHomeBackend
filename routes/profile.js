@@ -3,6 +3,8 @@
 import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
 import { getUser, updateProfile } from "../models/users.js";
+import { deleteAccount } from "../models/accounts.js";
+import { tokenBucket } from "../utils/rateLimit.js";
 import { resolvePlan, buildCapabilities, projectsLimitFor } from "../services/planService.js";
 
 const router = express.Router();
@@ -65,5 +67,30 @@ async function saveProfile(req, res) {
 
 router.put("/me", authMiddleware, saveProfile);
 router.post("/me", authMiddleware, saveProfile);
+
+/**
+ * POST /v1/profile/delete  { "confirm": true }
+ * Удаляет аккаунт и данные пользователя безвозвратно (см. models/accounts.js, что сохраняется по закону).
+ * Токены после удаления сразу перестают работать (401 account_deleted).
+ */
+router.post(
+    "/delete",
+    authMiddleware,
+    tokenBucket({ limitPerMin: 5, name: "delete-account" }),
+    async (req, res) => {
+        if (req.body?.confirm !== true) {
+            return res.status(400).json({ error: "invalid_request", message: "Нужно подтверждение: { \"confirm\": true }" });
+        }
+        const uid = req.user.uid;
+        try {
+            const deleted = await deleteAccount(uid);
+            await req.app.locals?.audit?.(`deleted:${uid}`, "delete_account", "user", null, { uid, ...deleted });
+            return res.json({ ok: true, deleted });
+        } catch (err) {
+            console.error("POST /v1/profile/delete error:", err?.message || err);
+            return res.status(500).json({ error: "server_error" });
+        }
+    }
+);
 
 export default router;

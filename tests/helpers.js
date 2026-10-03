@@ -72,6 +72,6 @@ export async function closeDb() {
 export async function truncateAll() {
     await pool.query(
         `TRUNCATE devices, "groups", rooms, projects, subscriptions, refresh_sessions,
-                  identities, users, entitlements, audit_log RESTART IDENTITY CASCADE`
+                  identities, users, entitlements, audit_log, deleted_accounts RESTART IDENTITY CASCADE`
     );
 }
