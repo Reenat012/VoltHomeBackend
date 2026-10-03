@@ -1,42 +1,39 @@
 // utils/jwt.js
+// Единое место подписи и проверки токенов. Секреты обязательны (см. utils/config.js).
 import jwt from "jsonwebtoken";
+import { randomUUID } from "node:crypto";
+import { getJwtSecrets, getAccessTtlMinutes } from "./config.js";
+
+const { access: ACCESS_SECRET, refresh: REFRESH_SECRET } = getJwtSecrets();
+
+export const ACCESS_TTL_MIN = getAccessTtlMinutes();
+
+/** Подписать access-токен сессии. */
+export function signToken(payload) {
+    return jwt.sign(payload, ACCESS_SECRET, { expiresIn: `${ACCESS_TTL_MIN}m`, algorithm: "HS256" });
+}
+
+/** Проверить access-токен и вернуть payload (или бросить исключение). */
+export function verifyToken(token) {
+    return jwt.verify(token, ACCESS_SECRET, { algorithms: ["HS256"] });
+}
 
 /**
- * Унифицированные секреты и TTL
- * - Подпись/проверка access-JWT выполняется ОДНИМ секретом:
- *   сначала JWT_ACCESS_SECRET, иначе fallback к SESSION_JWT_SECRET.
- * - TTL берём из ACCESS_TTL_MIN (в минутах), иначе из SESSION_JWT_TTL (например, "3600s").
+ * Refresh-токен. `jti` делает каждый токен уникальным: без него два токена одного пользователя,
+ * выпущенные в одну секунду, совпали бы, и хэш в базе тоже.
  */
-const ACCESS_SECRET =
-    process.env.JWT_ACCESS_SECRET ||
-    process.env.SESSION_JWT_SECRET || // fallback для совместимости
-    "change-me";
-
-// ACCESS_TTL_MIN имеет приоритет (минуты). Иначе используем строковый TTL из старой переменной.
-function resolveTtl() {
-    const min = Number(process.env.ACCESS_TTL_MIN);
-    if (Number.isFinite(min) && min > 0) {
-        return `${Math.floor(min)}m`;
-    }
-    return process.env.SESSION_JWT_TTL || "3600s";
+export function signRefreshToken(uid) {
+    return jwt.sign({ uid, typ: "refresh", jti: randomUUID() }, REFRESH_SECRET, {
+        algorithm: "HS256",
+        expiresIn: "90d",
+    });
 }
 
-const TTL = resolveTtl();
-
-/** Подписать новый JWT для клиентской сессии */
-export function signToken(payload) {
-    // Явно укажем алгоритм для предсказуемости
-    return jwt.sign(payload, ACCESS_SECRET, { expiresIn: TTL, algorithm: "HS256" });
-}
-
-/** Проверить JWT и вернуть payload (или кинуть исключение) */
-export function verifyToken(token) {
-    return jwt.verify(token, ACCESS_SECRET);
-}
-
-/** Проверить JWT, игнорируя истечение (нужно только для refresh-ручки) */
-export function verifyTokenAllowExpired(token) {
-    return jwt.verify(token, ACCESS_SECRET, { ignoreExpiration: true });
+/** Проверить refresh-токен. Бросает исключение, если подпись неверна или тип не refresh. */
+export function verifyRefreshToken(token) {
+    const decoded = jwt.verify(token, REFRESH_SECRET, { algorithms: ["HS256"] });
+    if (decoded?.typ !== "refresh") throw new Error("wrong_type");
+    return decoded;
 }
 
 /** Express-middleware: требует валидный Bearer <JWT> */
@@ -46,6 +43,7 @@ export function authMiddleware(req, res, next) {
     if (!m) return res.status(401).json({ error: "no_token" });
     try {
         req.user = verifyToken(m[1]);
+        if (!req.user?.uid || typeof req.user.uid !== "string") throw new Error("no_uid");
         next();
     } catch {
         return res.status(401).json({ error: "invalid_token" });

@@ -35,16 +35,21 @@ npm run testdb:psql             # консоль psql к тестовой БД
 - Расширения БД: `uuid-ossp`, `pgcrypto`, `plpgsql`
 
 ### Переменные окружения
-Создайте `.env` в корне:
+Скопируйте `env.example` в `.env` и заполните. **Без `JWT_ACCESS_SECRET` и `JWT_REFRESH_SECRET` сервер не запустится** (два разных случайных секрета не короче 16 символов; значения-заготовки вроде `change-me` отвергаются). Для входа по коду (веб) нужны `YANDEX_CLIENT_ID`, `YANDEX_CLIENT_SECRET`, `YANDEX_ALLOWED_REDIRECT_URIS`. База: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`.
 
-DATABASE_URL=postgres://user:pass@host:5432/dbname
-JWT_SECRET=very_secret_string
-REFRESH_TTL_DAYS=30
-PORT=3000
-NODE_ENV=production
+### Администрирование: ручная выдача PRO
+Только консольными командами на сервере (публичной админ-ручки нет). Пользователь должен хотя бы раз войти в приложение. Каждое действие пишется в `audit_log`.
+
+```bash
+npm run admin:find-user -- --email name@example.com      # найти uid (также --uid, --yandex-id)
+npm run admin:grant-pro -- --uid u_... --until 2027-01-31 --note "почему"   # без --until: бессрочно
+npm run admin:revoke-pro -- --uid u_...
+npm run admin:list-grants -- --uid u_... --active
+```
+Если у пользователя есть и подписка RuStore, и ручная выдача, действует та, что дольше.
 
 ### Миграции
-В БД должна быть таблица `schema_migrations`. Миграции лежат в `migrations/` и применяются вашим деплоем. Ключевые из последних:
+Миграции лежат в `migrations/`, применяются командой `npm run migrate` (откат последней: `npm run migrate:down`, секция `-- DOWN`). Раньше исполнитель выполнял и секцию DOWN, это исправлено. Новые миграции: `027` (users, identities), `028` (entitlements), `029` (client_updated_at). Ключевые из прежних:
 - `020_add_fk_cascade_not_valid.sql` / `021_cleanup_and_validate_fk.sql` — строгие FK + каскад.
 - `022_soft_delete_cascade_triggers.sql` — soft-каскад (триггеры).
 - `023_groups_default_index.sql` — частичный уникальный индекс для `__default__` групп.

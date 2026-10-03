@@ -13,10 +13,11 @@ import { fileURLToPath } from "url";
 
 // ВАЖНО: из server/ к роутам идём на уровень выше
 import projectsRouter from "../routes/projects.js";
-import authRouter from "../routes/auth.js";
+import { createAuthRouter } from "../routes/auth.js";
 import profileRouter from "../routes/profile.js";
 import { router as billingRouter } from "../routes/billing.js";
 import { pool } from "../db/pool.js";
+import { audit } from "../utils/audit.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,7 +31,11 @@ export function withTimeout(promise, ms) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-export async function createApp() {
+/**
+ * @param {{ yandex?: object, rateLimitPerMin?: number }} options
+ *   yandex: клиент проверки входа через Яндекс (в тестах подменяется), rateLimitPerMin: лимит запросов входа с IP.
+ */
+export async function createApp({ yandex, rateLimitPerMin } = {}) {
     const app = express();
 
     /** ---------------- Core security / proxy ---------------- */
@@ -102,12 +107,12 @@ export async function createApp() {
     if (process.env.NODE_ENV !== "test") app.use(morgan("dev"));
     app.use(express.json({ limit: "2mb" }));
 
-    // опциональный аудит-хук
-    app.locals.audit = async () => {};
+    // журнал действий (audit_log)
+    app.locals.audit = audit;
 
     /** ---------------- Routes ---------------- */
     app.use("/v1/projects", projectsRouter);
-    app.use("/v1/auth", authRouter);
+    app.use("/v1/auth", createAuthRouter({ yandex, rateLimitPerMin }));
     app.use("/v1/profile", profileRouter);
     app.use("/v1/billing", billingRouter);
 

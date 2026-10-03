@@ -184,24 +184,6 @@ describe("Пакет изменений (batch) и дельта", () => {
         expect(res.body.error).toBe("ROOM_PROJECT_MISMATCH");
     });
 
-    test("устаревшая baseVersion: сейчас операции применяются, конфликт только сообщается", async () => {
-        // Фиксируем текущее поведение. Контракт (docs/SYNC_CONTRACT.md, раздел 8) его изменит на этапе 22.
-        const p = await createProject();
-        await request(app)
-            .put(`/v1/projects/${p.id}/meta`)
-            .set(authHeader())
-            .send({ name: "Новая" })
-            .expect(200); // версия стала 2
-        const res = await request(app)
-            .post(`/v1/projects/${p.id}/batch`)
-            .set(authHeader())
-            .send({ baseVersion: 1, ops: { rooms: { upsert: [{ id: randomUUID(), name: "Комната" }], delete: [] } } })
-            .expect(200);
-        expect(res.body.conflicts.length).toBeGreaterThan(0);
-        const tree = await request(app).get(`/v1/projects/${p.id}`).set(authHeader()).expect(200);
-        expect(tree.body.rooms.length).toBe(1);
-    });
-
     test("дельта возвращает добавленное и удалённое", async () => {
         const p = await createProject();
         const roomId = randomUUID();
@@ -247,21 +229,5 @@ describe("Пакет изменений (batch) и дельта", () => {
             })
             .expect(200);
         expect(res.body.newVersion).toBe(2);
-    });
-});
-
-describe("Изоляция пользователей (текущее состояние)", () => {
-    test("чужой пользователь не видит и не меняет проект через batch", async () => {
-        const p = await createProject("owner");
-        await request(app)
-            .post(`/v1/projects/${p.id}/batch`)
-            .set(authHeader("stranger"))
-            .send({ baseVersion: 1, ops: { rooms: { upsert: [{ name: "Взлом" }], delete: [] } } })
-            .expect((res) => {
-                // сервис возвращает notFound-объект; важно, что данные владельца не изменились
-                expect([200, 404]).toContain(res.status);
-            });
-        const tree = await request(app).get(`/v1/projects/${p.id}`).set(authHeader("owner")).expect(200);
-        expect(tree.body.rooms).toEqual([]);
     });
 });

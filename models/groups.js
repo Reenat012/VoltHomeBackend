@@ -1,5 +1,6 @@
 // models/groups.js
 import { query } from "../db/pool.js";
+import { classifyUpserts, assertRoomsInProject, parseClientTs } from "./upsertGuard.js";
 
 /** Нормализация meta в строку JSON или null */
 function metaToJson(meta) {
@@ -79,8 +80,13 @@ export async function ensureDefaultGroups(projectId, roomIds) {
  *   - name (может быть null)
  *   - meta (объект или строка JSON)
  */
-export async function upsertGroups(projectId, items) {
-    if (!items?.length) return [];
+export async function upsertGroups(projectId, itemsAll) {
+    if (!itemsAll?.length) return { rows: [], skipped: [] };
+    // Чужой id даёт ошибку 409; запись новее клиентской пропускается; комнаты должны быть из этого проекта
+    const { accept: items, skipped } = await classifyUpserts('public."groups"', "groups", projectId, itemsAll);
+    if (!items.length) return { rows: [], skipped };
+    await assertRoomsInProject(projectId, items.map(extractRoomIdNullable));
+
     const values = [];
     const params = [];
     let i = 1;
@@ -88,22 +94,23 @@ export async function upsertGroups(projectId, items) {
     for (const g of items) {
         const roomId = extractRoomIdNullable(g);
         values.push(
-            `(COALESCE($${i++}::uuid, uuid_generate_v4()), $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, now(), FALSE)`
+            `(COALESCE($${i++}::uuid, uuid_generate_v4()), $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, now(), FALSE, $${i++}::timestamptz)`
         );
         params.push(
             g.id || null,          // id (или сгенерим)
             projectId,             // project_id
             roomId,                // room_id
             g.name ?? null,        // name
-            metaToJson(g.meta)     // meta (jsonb|null)
+            metaToJson(g.meta),    // meta (jsonb|null)
+            parseClientTs(g)       // client_updated_at
         );
     }
 
     const sql = `
-        INSERT INTO public."groups" (id, project_id, room_id, name, meta, updated_at, is_deleted)
+        INSERT INTO public."groups" (id, project_id, room_id, name, meta, updated_at, is_deleted, client_updated_at)
         VALUES ${values.join(",")}
             ON CONFLICT (id) DO UPDATE SET
-            project_id = EXCLUDED.project_id,
+            client_updated_at = COALESCE(EXCLUDED.client_updated_at, "groups".client_updated_at),
                                     room_id    = EXCLUDED.room_id,
                                     name       = COALESCE(EXCLUDED.name, "groups".name),
                                     meta       = COALESCE(EXCLUDED.meta, "groups".meta),
@@ -113,7 +120,7 @@ export async function upsertGroups(projectId, items) {
                                     RETURNING id, project_id, room_id, name, meta, updated_at, is_deleted;
     `;
     const res = await query(sql, params);
-    return res.rows;
+    return { rows: res.rows, skipped };
 }
 
 /** Мягкое удаление групп по id */
