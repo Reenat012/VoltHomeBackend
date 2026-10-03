@@ -4,8 +4,18 @@
 //   npm run admin:grant-pro -- --uid u_... [--until 2027-01-31] [--note "почему"]
 //   npm run admin:revoke-pro -- --uid u_...
 //   npm run admin:list-grants -- [--uid u_...] [--active]
+//   npm run admin:doc-versions -- --project <uuid> --kind panel_layout
+//   npm run admin:doc-restore -- --project <uuid> --kind panel_layout --version 7
 import { pool } from "../db/pool.js";
-import { findUsers, grantPro, revokePro, listGrants, AdminError } from "../services/adminService.js";
+import {
+    findUsers,
+    grantPro,
+    revokePro,
+    listGrants,
+    listDocumentVersions,
+    restoreDocumentVersion,
+    AdminError,
+} from "../services/adminService.js";
 
 function parseArgs(argv) {
     const out = {};
@@ -57,8 +67,26 @@ async function main() {
             }
             break;
         }
+        case "doc-versions": {
+            const rows = await listDocumentVersions({ projectId: args.project, kind: args.kind });
+            if (!rows.length) console.log("Версий нет");
+            for (const r of rows) {
+                console.log(`версия ${r.version}  схема ${r.schema_version}  ${new Date(r.updated_at).toISOString()}  ${r.updated_by}${r.is_deleted ? "  (удалён)" : ""}`);
+            }
+            break;
+        }
+        case "doc-restore": {
+            const row = await restoreDocumentVersion({
+                projectId: args.project,
+                kind: args.kind,
+                version: args.version,
+                restoredBy: "cli",
+            });
+            console.log(`Восстановлено: создана версия ${row.version} (данные версии ${args.version})`);
+            break;
+        }
         default:
-            console.error("Команды: find-user, grant-pro, revoke-pro, list-grants");
+            console.error("Команды: find-user, grant-pro, revoke-pro, list-grants, doc-versions, doc-restore");
             process.exitCode = 1;
     }
 }

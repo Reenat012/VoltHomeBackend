@@ -19,7 +19,9 @@
     "admin:find-user": "node scripts/admin.js find-user",
     "admin:grant-pro": "node scripts/admin.js grant-pro",
     "admin:revoke-pro": "node scripts/admin.js revoke-pro",
-    "admin:list-grants": "node scripts/admin.js list-grants"
+    "admin:list-grants": "node scripts/admin.js list-grants",
+    "admin:doc-versions": "node scripts/admin.js doc-versions",
+    "admin:doc-restore": "node scripts/admin.js doc-restore"
   },
   "dependencies": {
     "cors": "^2.8.5",

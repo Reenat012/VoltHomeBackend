@@ -48,8 +48,16 @@ npm run admin:list-grants -- --uid u_... --active
 ```
 Если у пользователя есть и подписка RuStore, и ручная выдача, действует та, что дольше.
 
+### Документы проекта (щит, 2D CAD и др.)
+`GET/PUT/DELETE /v1/projects/:id/documents[/:kind]`: JSON-документы, которые правятся целиком; сервер хранит их как есть. Контракт: `docs/SYNC_CONTRACT.md` (веб-репозиторий), раздел 7. Версии с оптимистичной блокировкой (`409`), доступ по праву PRO на сервере (`402`), история последних 20 версий. Откат на сервере:
+
+```bash
+npm run admin:doc-versions -- --project <uuid> --kind panel_layout
+npm run admin:doc-restore -- --project <uuid> --kind panel_layout --version 7   # станет новой версией
+```
+
 ### Миграции
-Миграции лежат в `migrations/`, применяются командой `npm run migrate` (откат последней: `npm run migrate:down`, секция `-- DOWN`). Раньше исполнитель выполнял и секцию DOWN, это исправлено. Новые миграции: `027` (users, identities), `028` (entitlements), `029` (client_updated_at). Ключевые из прежних:
+Миграции лежат в `migrations/`, применяются командой `npm run migrate` (откат последней: `npm run migrate:down`, секция `-- DOWN`). Раньше исполнитель выполнял и секцию DOWN, это исправлено. Новые миграции: `027` (users, identities), `028` (entitlements), `029` (client_updated_at), `030` (документы проекта). Ключевые из прежних:
 - `020_add_fk_cascade_not_valid.sql` / `021_cleanup_and_validate_fk.sql` — строгие FK + каскад.
 - `022_soft_delete_cascade_triggers.sql` — soft-каскад (триггеры).
 - `023_groups_default_index.sql` — частичный уникальный индекс для `__default__` групп.

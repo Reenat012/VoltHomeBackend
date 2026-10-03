@@ -4,6 +4,7 @@
 import { query } from "../db/pool.js";
 import { grantEntitlement, revokeEntitlements, listEntitlements } from "../models/entitlements.js";
 import { audit } from "../utils/audit.js";
+import { DOCUMENT_KINDS, getDocument, putDocument, listVersions, getVersion } from "../models/documents.js";
 
 export class AdminError extends Error {}
 
@@ -60,4 +61,44 @@ export async function revokePro({ uid, revokedBy = "cli" }) {
 
 export async function listGrants({ uid = null, activeOnly = false } = {}) {
     return listEntitlements({ userId: uid, activeOnly });
+}
+
+function requireDocArgs({ projectId, kind }) {
+    if (!projectId) throw new AdminError("Укажите --project (идентификатор проекта)");
+    if (!kind || !Object.prototype.hasOwnProperty.call(DOCUMENT_KINDS, kind)) {
+        throw new AdminError(`Укажите --kind: ${Object.keys(DOCUMENT_KINDS).join(", ")}`);
+    }
+}
+
+/** История версий документа проекта (последние сохранённые). */
+export async function listDocumentVersions({ projectId, kind }) {
+    requireDocArgs({ projectId, kind });
+    return listVersions(projectId, kind);
+}
+
+/**
+ * Восстановление: данные выбранной версии записываются как НОВАЯ версия (история не теряется).
+ * Возвращает новую версию документа.
+ */
+export async function restoreDocumentVersion({ projectId, kind, version, restoredBy = "cli" }) {
+    requireDocArgs({ projectId, kind });
+    const v = Number(version);
+    if (!Number.isInteger(v) || v < 1) throw new AdminError("Укажите --version (номер версии)");
+    const old = await getVersion(projectId, kind, v);
+    if (!old) throw new AdminError(`Версия ${v} не найдена (хранятся только последние версии)`);
+    const cur = await getDocument(projectId, kind);
+    const row = await putDocument({
+        projectId,
+        kind,
+        baseVersion: cur ? cur.version : 0,
+        schemaVersion: Math.max(old.schema_version, cur ? cur.schema_version : 1),
+        data: old.data,
+        userId: `admin:${restoredBy}`,
+    });
+    await audit(`admin:${restoredBy}`, "restore_document", "projects", projectId, {
+        kind,
+        restoredFrom: v,
+        newVersion: row.version,
+    });
+    return row;
 }

@@ -13,6 +13,8 @@ import { fileURLToPath } from "url";
 
 // ВАЖНО: из server/ к роутам идём на уровень выше
 import projectsRouter from "../routes/projects.js";
+import documentsRouter from "../routes/documents.js";
+import { authMiddleware } from "../utils/jwt.js";
 import { createAuthRouter } from "../routes/auth.js";
 import profileRouter from "../routes/profile.js";
 import { router as billingRouter } from "../routes/billing.js";
@@ -111,6 +113,8 @@ export async function createApp({ yandex, rateLimitPerMin } = {}) {
     app.locals.audit = audit;
 
     /** ---------------- Routes ---------------- */
+    // Документы проекта подключаем раньше общего роутера проектов
+    app.use("/v1/projects/:id/documents", authMiddleware, documentsRouter);
     app.use("/v1/projects", projectsRouter);
     app.use("/v1/auth", createAuthRouter({ yandex, rateLimitPerMin }));
     app.use("/v1/profile", profileRouter);
@@ -145,6 +149,26 @@ export async function createApp({ yandex, rateLimitPerMin } = {}) {
         } catch (e) {
             res.status(500).json({ db: "error", message: e.message });
         }
+    });
+
+    /** ---------------- Неизвестные адреса ---------------- */
+    app.use((_req, res) => res.status(404).json({ error: "not_found" }));
+
+    /** ---------------- Ошибки ---------------- */
+    // Единый JSON-ответ вместо HTML от Express (слишком большое тело, битый JSON, запрещённый CORS)
+    // eslint-disable-next-line no-unused-vars
+    app.use((err, _req, res, _next) => {
+        if (err?.type === "entity.too.large") {
+            return res.status(413).json({ error: "payload_too_large", message: "Тело запроса слишком большое" });
+        }
+        if (err?.type === "entity.parse.failed") {
+            return res.status(400).json({ error: "invalid_json", message: "Тело запроса не является корректным JSON" });
+        }
+        if (typeof err?.message === "string" && err.message.startsWith("CORS:")) {
+            return res.status(403).json({ error: "cors_forbidden" });
+        }
+        console.error("[app] необработанная ошибка:", err?.message || err);
+        return res.status(500).json({ error: "server_error" });
     });
 
     return app;
