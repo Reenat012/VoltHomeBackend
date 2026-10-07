@@ -33,7 +33,7 @@ describe("Секреты подписи токенов", () => {
         }
     );
 
-    test.each(["change-me-access-secret-long", "__PUT_LATER__PUT_LATER__"])(
+    test.each(["change-me-access-secret-long", "__PUT_LATER__PUT_LATER__", "__ЗАПОЛНИТЬ__ЗАПОЛНИТЬ__"])(
         "заготовка из env.example %s запрещена",
         (bad) => {
             expect(() => getJwtSecrets({ ...good, JWT_ACCESS_SECRET: bad })).toThrow(/по умолчанию/);

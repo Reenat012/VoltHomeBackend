@@ -12,7 +12,7 @@ function checkSecret(name, value) {
         throw new Error(`Не задана обязательная переменная окружения ${name}`);
     }
     // Запасные значения из старого кода и заготовки из env.example (change-me-..., __PUT_LATER__) тоже запрещены
-    if (FORBIDDEN_SECRETS.has(value) || /change-me|__put_later__/i.test(value)) {
+    if (FORBIDDEN_SECRETS.has(value) || /change-me|__put_later__|__заполнить__/i.test(value)) {
         throw new Error(`${name}: нельзя использовать значение по умолчанию`);
     }
     if (value.length < MIN_SECRET_LENGTH) {

@@ -24,6 +24,21 @@ import { audit } from "../utils/audit.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Откуда доверять заголовку X-Forwarded-For. По умолчанию только с самого сервера (HTTPS обслуживает прокси Caddy
+ * на том же компьютере, и приложение слушает 127.0.0.1). Значение "true" доверяет любому: так клиент мог бы подделать
+ * свой IP и обойти ограничение частоты, поэтому оно не используется по умолчанию.
+ * TRUST_PROXY: loopback (по умолчанию) | число прыжков | true | список адресов.
+ */
+export function parseTrustProxy(value) {
+    if (value === undefined || value === null || String(value).trim() === "") return "loopback";
+    const v = String(value).trim();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    if (/^\d+$/.test(v)) return Number(v);
+    return v;
+}
+
 export function withTimeout(promise, ms) {
     let timer;
     const timeout = new Promise((_, rej) => {
@@ -41,7 +56,9 @@ export async function createApp({ yandex, rateLimitPerMin } = {}) {
     const app = express();
 
     /** ---------------- Core security / proxy ---------------- */
-    app.set("trust proxy", true);
+    app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
+    // Не сообщаем, на чём работает сервер
+    app.disable("x-powered-by");
 
     /**
      * Принудительный редирект HTTP -> HTTPS (TLS завершается на балансировщике).
@@ -66,12 +83,13 @@ export async function createApp({ yandex, rateLimitPerMin } = {}) {
         });
     }
 
-    /** Включаем HSTS, чтобы браузер всегда ходил по HTTPS */
+    /** HSTS (браузер всегда ходит по HTTPS) и запрет угадывания типа содержимого */
     app.use((req, res, next) => {
         res.setHeader(
             "Strict-Transport-Security",
             "max-age=31536000; includeSubDomains; preload"
         );
+        res.setHeader("X-Content-Type-Options", "nosniff");
         next();
     });
 
