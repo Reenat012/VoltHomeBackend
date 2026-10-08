@@ -34,7 +34,7 @@ scp scripts/server-setup.sh root@IP_СЕРВЕРА:/root/
 ssh root@IP_СЕРВЕРА 'bash /root/server-setup.sh api.volthome.ru'
 ```
 
-Скрипт идемпотентный (можно запускать повторно). Он обновляет систему, ставит Node.js 20 (NodeSource), pm2, Caddy (официальный репозиторий), fail2ban, включает брандмауэр (открыты только 22, 80 и 443), создаёт пользователя `deploy` и каталог `/var/www/VoltHomeBackend` и кладёт туда заготовку `.env`.
+Скрипт идемпотентный (можно запускать повторно). Он обновляет систему, ставит Node.js 22 LTS (NodeSource; Node 20 снят с поддержки в апреле 2026), pm2, Caddy (официальный репозиторий), fail2ban, включает брандмауэр (открыты только 22, 80 и 443), создаёт пользователя `deploy` и каталог `/var/www/VoltHomeBackend` и кладёт туда заготовку `.env`.
 
 Внешние источники, откуда скрипт скачивает пакеты: репозитории Ubuntu, `deb.nodesource.com`, `dl.cloudsmith.io` (Caddy), `registry.npmjs.org`.
 

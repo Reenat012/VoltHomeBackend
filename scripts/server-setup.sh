@@ -7,7 +7,7 @@
 #
 # Откуда скачивается код (внешние источники):
 #   - Ubuntu: обновления системы и fail2ban, ufw, unattended-upgrades (репозитории Ubuntu)
-#   - NodeSource (deb.nodesource.com): Node.js 20, в репозитории Ubuntu 24.04 версия слишком старая
+#   - NodeSource (deb.nodesource.com): Node.js 22 LTS (Node 20 снят с поддержки в апреле 2026), в репозитории Ubuntu 24.04 версия другая
 #   - Caddy (dl.cloudsmith.io, официальный репозиторий проекта Caddy): веб-сервер с автоматическим HTTPS
 #   - npm (registry.npmjs.org): pm2, менеджер процессов
 set -euo pipefail
@@ -45,9 +45,9 @@ if ! swapon --show | grep -q .; then
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-say "4/9 Node.js 20"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 20 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+say "4/9 Node.js 22"
+if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 22 ]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
 node -v

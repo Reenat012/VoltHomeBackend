@@ -30,7 +30,7 @@ npm run testdb:psql             # консоль psql к тестовой БД
 ## Быстрый старт
 
 ### Зависимости
-- Node.js 18+ (рекомендовано 20 LTS)
+- Node.js 20+ (на сервере и в CI используется 22 LTS)
 - PostgreSQL 14+
 - Расширения БД: `uuid-ossp`, `pgcrypto`, `plpgsql`
 
