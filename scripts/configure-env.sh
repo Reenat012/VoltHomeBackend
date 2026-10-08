@@ -95,7 +95,7 @@ fi
 
 echo
 echo "Проверка подключения к базе $HOST:"
-PGPASSWORD="$DB_PASSWORD" PGSSLMODE=require psql -h "$HOST" -p 5432 -U "$USER_NAME" -d "$DB" -v ON_ERROR_STOP=1 -X -q \
+PGPASSWORD="$DB_PASSWORD" PGSSLMODE=require psql -h "$HOST" -p 5432 -U "$USER_NAME" -d "$DB" -v ON_ERROR_STOP=1 -X -q -P pager=off \
   -c "select version();" \
   -c "select name from pg_available_extensions where name in ('uuid-ossp','pgcrypto') order by name;" \
   -c "select rolsuper, rolcreatedb from pg_roles where rolname = current_user;"
