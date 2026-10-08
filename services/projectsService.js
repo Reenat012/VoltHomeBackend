@@ -71,18 +71,19 @@ export async function getDelta({ userId, projectId, since }) {
 }
 
 /**
- * Батч-запись с LWW и проверкой baseVersion.
+ * Пакетная запись. Все операции выполняются одной транзакцией: ошибка откатывает всё.
  * Порядок:
  *   DELETE: devices → groups → rooms
  *   UPSERT: rooms → groups → devices
- * Версию инкрементируем в той же транзакции.
+ * Правило конфликтов (docs/SYNC_CONTRACT.md, раздел 8): «последний победил по записи».
+ * Запись, у которой на сервере более новая версия, пропускается и возвращается в conflicts
+ * с причиной server_newer. baseVersion принимается для совместимости, но на решение не влияет.
  */
-export async function applyBatch({ userId, projectId, baseVersion, ops }) {
+export async function applyBatch({ userId, projectId, ops }) {
     const meta = await getProjectMeta({ userId, projectId });
     if (!meta) return { notFound: true };
 
     const conflicts = [];
-    const stale = typeof baseVersion === "number" && baseVersion < meta.version;
 
     const newVersion = await withTransaction(async (client) => {
         // DELETE (дети → родители)
@@ -91,8 +92,14 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
         if (ops?.rooms?.delete?.length)   await deleteRooms(projectId, ops.rooms.delete);
 
         // UPSERT (родители → дети)
-        if (ops?.rooms?.upsert?.length)   await upsertRooms(projectId, ops.rooms.upsert);
-        if (ops?.groups?.upsert?.length)  await upsertGroups(projectId, ops.groups.upsert);
+        if (ops?.rooms?.upsert?.length) {
+            const r = await upsertRooms(projectId, ops.rooms.upsert);
+            conflicts.push(...r.skipped);
+        }
+        if (ops?.groups?.upsert?.length) {
+            const g = await upsertGroups(projectId, ops.groups.upsert);
+            conflicts.push(...g.skipped);
+        }
 
         // Обеспечиваем дефолтные группы под комнаты, используемые в devices.meta.room_id
         if (ops?.devices?.upsert?.length) {
@@ -109,7 +116,8 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
             if (roomIds.length) {
                 await ensureDefaultGroups(projectId, roomIds);
             }
-            await upsertDevices(projectId, ops.devices.upsert);
+            const d = await upsertDevices(projectId, ops.devices.upsert);
+            conflicts.push(...d.skipped);
         }
 
         // Инкремент версии проекта — внутри той же транзакции
@@ -123,19 +131,6 @@ export async function applyBatch({ userId, projectId, baseVersion, ops }) {
 
         return verRes.rows?.[0]?.version ?? meta.version + 1;
     });
-
-    if (stale) {
-        const reason = "Stale baseVersion; server wins (LWW)";
-        const items = [
-            ...(ops?.rooms?.upsert   || []).map((x) => ["rooms",   x.id]),
-            ...(ops?.groups?.upsert  || []).map((x) => ["groups",  x.id]),
-            ...(ops?.devices?.upsert || []).map((x) => ["devices", x.id]),
-            ...(ops?.rooms?.delete   || []).map((id) => ["rooms",   id]),
-            ...(ops?.groups?.delete  || []).map((id) => ["groups",  id]),
-            ...(ops?.devices?.delete || []).map((id) => ["devices", id]),
-        ];
-        for (const [entity, id] of items) conflicts.push(conflict(reason, entity, id));
-    }
 
     return { newVersion, conflicts };
 }

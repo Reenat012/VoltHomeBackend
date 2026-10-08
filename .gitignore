@@ -43,3 +43,7 @@ Thumbs.db
 # Build artifacts (если когда-нибудь будешь билдить фронт)
 dist/
 build/
+# Локальная тестовая БД и её настройки
+.testdb/
+.env.test
+!.env.test.example

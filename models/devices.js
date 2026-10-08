@@ -1,6 +1,7 @@
 // models/devices.js
 import { query } from "../db/pool.js";
 import { ensureDefaultGroups } from "./groups.js";
+import { classifyUpserts, assertGroupsInProject, parseClientTs } from "./upsertGuard.js";
 
 /** Нормализация meta в строку JSON или null */
 function metaToJson(meta) {
@@ -37,7 +38,7 @@ function uniq(arr) {
  * - Вставки/апдейты всегда задают updated_at и is_deleted.
  */
 export async function upsertDevices(projectId, items) {
-    if (!items?.length) return [];
+    if (!items?.length) return { rows: [], skipped: [] };
 
     // Собираем и валидируем room_id из meta
     const roomIds = uniq(items.map(d => extractRoomId(d.meta)));
@@ -66,8 +67,11 @@ export async function upsertDevices(projectId, items) {
         ? await ensureDefaultGroups(projectId, roomIds).catch(() => new Map())
         : new Map();
 
+    // group_id, пришедший от клиента, обязан принадлежать этому проекту (раньше проверял только внешний ключ)
+    await assertGroupsInProject(projectId, items.map((d) => d.groupId ?? d.group_id));
+
     // Нормализуем элементы и разделяем на "с id" / "без id"
-    const withId = [];
+    const withIdAll = [];
     const noId = [];
 
     for (const d of items) {
@@ -95,10 +99,12 @@ export async function upsertDevices(projectId, items) {
             meta: d.meta ?? null,
         };
 
-        (norm.id ? withId : noId).push(norm);
+        (norm.id ? withIdAll : noId).push(norm);
     }
 
     const out = [];
+    // Чужой id даёт ошибку 409; запись новее клиентской пропускается (см. models/upsertGuard.js)
+    const { accept: withId, skipped } = await classifyUpserts("public.devices", "devices", projectId, withIdAll);
 
     // 1) bulk UPSERT с id (LWW по id в рамках project_id)
     if (withId.length) {
@@ -108,27 +114,28 @@ export async function upsertDevices(projectId, items) {
 
         for (const d of withId) {
             values.push(
-                `($${i++}::uuid, $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, NOW(), FALSE)`
+                `($${i++}::uuid, $${i++}::uuid, $${i++}::uuid, $${i++}::text, $${i++}::jsonb, NOW(), FALSE, $${i++}::timestamptz)`
             );
             params.push(
                 d.id,               // id
                 projectId,          // project_id
                 d.group_id,         // group_id
                 d.name,             // name
-                metaToJson(d.meta)  // meta
+                metaToJson(d.meta), // meta
+                parseClientTs(d)    // client_updated_at
             );
         }
 
         const sql = `
-      INSERT INTO public.devices (id, project_id, group_id, name, meta, updated_at, is_deleted)
+      INSERT INTO public.devices (id, project_id, group_id, name, meta, updated_at, is_deleted, client_updated_at)
       VALUES ${values.join(", ")}
       ON CONFLICT (id) DO UPDATE SET
-        project_id = EXCLUDED.project_id,
         group_id   = EXCLUDED.group_id,
         name       = EXCLUDED.name,
         meta       = EXCLUDED.meta,
         updated_at = NOW(),
-        is_deleted = FALSE
+        is_deleted = FALSE,
+        client_updated_at = COALESCE(EXCLUDED.client_updated_at, public.devices.client_updated_at)
       WHERE public.devices.project_id = EXCLUDED.project_id
       RETURNING id, project_id, group_id, name, meta, updated_at, is_deleted;
     `;
@@ -163,7 +170,7 @@ export async function upsertDevices(projectId, items) {
         out.push(...res.rows);
     }
 
-    return out;
+    return { rows: out, skipped };
 }
 
 /** Мягкое удаление */

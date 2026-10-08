@@ -2,24 +2,65 @@
 
 Node.js/Express backend для VoltHome. Хранит проекты/комнаты/группы/устройства в PostgreSQL, поддерживает офлайн-синхронизацию через пакетные операции (Batch) и версионирование проекта.
 
+## Backend общий для Android и веба
+
+Этот сервер используют и приложение для Android, и сайт. Правила:
+- Источник истины по API: `docs/SYNC_CONTRACT.md` в репозитории веба (`volthome-web`). Сначала меняем контракт, потом код.
+- В `/v1` нет ломающих изменений: старые версии приложений живут месяцами. Ломающее идёт в `/v2`.
+- Каждое изменение сопровождается тестами и записью в `CHANGELOG.md`.
+- Выкладка (GitHub Actions, push в `main`) идёт только после зелёных тестов.
+
+## Тесты
+
+Тесты интеграционные, на настоящей PostgreSQL. **Никогда на боевой базе**: в режиме `NODE_ENV=test` код отказывается работать с любым хостом, кроме `localhost`/`127.0.0.1`, а `npm test` читает `.env.test`, а не `.env`.
+
+```bash
+brew install postgresql@16      # один раз; нужен серверный PostgreSQL (не только psql)
+npm ci
+npm run testdb:start            # отдельный кластер в .testdb/ на порту 54329 (создаст .env.test)
+npm test                        # перед тестами схема тестовой БД пересоздаётся и применяются все миграции
+TEST_LOGS=1 npm test            # то же, но с логами приложения
+npm run testdb:stop             # остановить тестовую БД
+npm run testdb:reset            # сбросить схему вручную
+npm run testdb:psql             # консоль psql к тестовой БД
+```
+
+Тесты `test.failing` в `tests/security-known-gaps.test.js` описывают известные дыры (см. `docs/PLAN_BACKEND_CAD.md`, этап 22). Когда дыру закрывают, такой тест начинает падать: уберите `.failing`.
+
 ## Быстрый старт
 
 ### Зависимости
-- Node.js 18+ (рекомендовано 20 LTS)
+- Node.js 20+ (на сервере и в CI используется 22 LTS)
 - PostgreSQL 14+
 - Расширения БД: `uuid-ossp`, `pgcrypto`, `plpgsql`
 
 ### Переменные окружения
-Создайте `.env` в корне:
+Скопируйте `env.example` в `.env` и заполните. **Без `JWT_ACCESS_SECRET` и `JWT_REFRESH_SECRET` сервер не запустится** (два разных случайных секрета не короче 16 символов; значения-заготовки вроде `change-me` отвергаются). Для входа по коду (веб) нужны `YANDEX_CLIENT_ID`, `YANDEX_CLIENT_SECRET`, `YANDEX_ALLOWED_REDIRECT_URIS`. База: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`.
 
-DATABASE_URL=postgres://user:pass@host:5432/dbname
-JWT_SECRET=very_secret_string
-REFRESH_TTL_DAYS=30
-PORT=3000
-NODE_ENV=production
+### Администрирование: ручная выдача PRO
+Только консольными командами на сервере (публичной админ-ручки нет). Пользователь должен хотя бы раз войти в приложение. Каждое действие пишется в `audit_log`.
+
+```bash
+npm run admin:find-user -- --email name@example.com      # найти uid (также --uid, --yandex-id)
+npm run admin:grant-pro -- --uid u_... --until 2027-01-31 --note "почему"   # без --until: бессрочно
+npm run admin:revoke-pro -- --uid u_...
+npm run admin:list-grants -- --uid u_... --active
+```
+Если у пользователя есть и подписка RuStore, и ручная выдача, действует та, что дольше.
+
+### Удаление аккаунта
+`POST /v1/profile/delete { "confirm": true }` (с Bearer) удаляет аккаунт и все данные пользователя безвозвратно; выданные токены перестают работать сразу. Не удаляются сведения о подписке (`subscriptions`) и технический журнал (`audit_log`): они нужны для защиты прав сторон (см. Политику конфиденциальности).
+
+### Документы проекта (щит, 2D CAD и др.)
+`GET/PUT/DELETE /v1/projects/:id/documents[/:kind]`: JSON-документы, которые правятся целиком; сервер хранит их как есть. Контракт: `docs/SYNC_CONTRACT.md` (веб-репозиторий), раздел 7. Версии с оптимистичной блокировкой (`409`), доступ по праву PRO на сервере (`402`), история последних 20 версий. Откат на сервере:
+
+```bash
+npm run admin:doc-versions -- --project <uuid> --kind panel_layout
+npm run admin:doc-restore -- --project <uuid> --kind panel_layout --version 7   # станет новой версией
+```
 
 ### Миграции
-В БД должна быть таблица `schema_migrations`. Миграции лежат в `migrations/` и применяются вашим деплоем. Ключевые из последних:
+Миграции лежат в `migrations/`, применяются командой `npm run migrate` (откат последней: `npm run migrate:down`, секция `-- DOWN`). Раньше исполнитель выполнял и секцию DOWN, это исправлено. Новые миграции: `027` (users, identities), `028` (entitlements), `029` (client_updated_at), `030` (документы проекта), `031` (удалённые аккаунты). Ключевые из прежних:
 - `020_add_fk_cascade_not_valid.sql` / `021_cleanup_and_validate_fk.sql` — строгие FK + каскад.
 - `022_soft_delete_cascade_triggers.sql` — soft-каскад (триггеры).
 - `023_groups_default_index.sql` — частичный уникальный индекс для `__default__` групп.

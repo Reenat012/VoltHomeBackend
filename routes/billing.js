@@ -1,10 +1,8 @@
 // routes/billing.js
 import express from "express";
 import { authMiddleware } from "../utils/jwt.js";
-import {
-    getActiveSubscriptionForUser,
-    derivePlanFromSubscription,
-} from "../models/subscriptions.js";
+import { derivePlanFromSubscription } from "../models/subscriptions.js";
+import { resolvePlan } from "../services/planService.js";
 import { confirmRustorePurchase } from "../services/rustoreBillingService.js";
 
 const router = express.Router();
@@ -83,20 +81,16 @@ router.get("/status", authMiddleware, async (req, res) => {
             return res.status(401).json({ error: "unauthorized" });
         }
 
-        const activeSub = await getActiveSubscriptionForUser(userId, {
-            billingTraceId,
-        });
-
-        const { plan, planUntilEpochSeconds } =
-            derivePlanFromSubscription(activeSub);
+        const info = await resolvePlan(userId, { billingTraceId });
 
         finalOutcome = "STATUS_OK";
 
         return res.json({
-            plan,
-            status: activeSub?.status ?? "NONE",
-            productId: activeSub?.product_id ?? null,
-            periodEndEpochSeconds: planUntilEpochSeconds,
+            plan: info.plan,
+            status: info.status,
+            productId: info.productId,
+            periodEndEpochSeconds: info.planUntilEpochSeconds,
+            planSource: info.planSource,
         });
     } catch (e) {
         console.error(

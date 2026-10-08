@@ -1,5 +1,6 @@
 // models/rooms.js
 import { query } from "../db/pool.js";
+import { classifyUpserts, parseClientTs } from "./upsertGuard.js";
 
 /** Нормализация meta в строку JSON или null */
 function metaToJson(meta) {
@@ -19,13 +20,15 @@ function metaToJson(meta) {
  * Это снимает потребность в частичном уникальном индексе и устраняет 42P10.
  */
 export async function upsertRooms(projectId, items) {
-    if (!items?.length) return [];
+    if (!items?.length) return { rows: [], skipped: [] };
 
-    const withId = [];
+    const withIdAll = [];
     const noId = [];
-    for (const r of items) (r?.id ? withId : noId).push(r);
+    for (const r of items) (r?.id ? withIdAll : noId).push(r);
 
     const rows = [];
+    // Чужой id даёт ошибку 409; запись новее клиентской пропускается (см. models/upsertGuard.js)
+    const { accept: withId, skipped } = await classifyUpserts("rooms", "rooms", projectId, withIdAll);
 
     // 1) Bulk по id (LWW)
     if (withId.length) {
@@ -35,26 +38,28 @@ export async function upsertRooms(projectId, items) {
 
         for (const r of withId) {
             values.push(
-                `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, now(), false)`
+                `(COALESCE($${i++}, uuid_generate_v4()), $${i++}, $${i++}, $${i++}, now(), false, $${i++}::timestamptz)`
             );
             params.push(
                 r.id || null,        // id
                 projectId,           // project_id
                 r.name ?? null,      // name
-                metaToJson(r.meta)   // meta
+                metaToJson(r.meta),  // meta
+                parseClientTs(r)     // client_updated_at
             );
         }
 
         const sql = `
-            INSERT INTO rooms (id, project_id, name, meta, updated_at, is_deleted)
+            INSERT INTO rooms (id, project_id, name, meta, updated_at, is_deleted, client_updated_at)
             VALUES ${values.join(",")}
                 ON CONFLICT (id) DO UPDATE SET
-                project_id = EXCLUDED.project_id,
-                                        name       = COALESCE(EXCLUDED.name, rooms.name),
-                                        meta       = COALESCE(EXCLUDED.meta, rooms.meta),
-                                        updated_at = now(),
-                                        is_deleted = false
-                                        RETURNING id, project_id, name, meta, updated_at, is_deleted;
+                name       = COALESCE(EXCLUDED.name, rooms.name),
+                meta       = COALESCE(EXCLUDED.meta, rooms.meta),
+                updated_at = now(),
+                is_deleted = false,
+                client_updated_at = COALESCE(EXCLUDED.client_updated_at, rooms.client_updated_at)
+                WHERE rooms.project_id = EXCLUDED.project_id
+                RETURNING id, project_id, name, meta, updated_at, is_deleted;
         `;
         const res = await query(sql, params);
         rows.push(...res.rows);
@@ -91,7 +96,7 @@ export async function upsertRooms(projectId, items) {
         rows.push(ins.rows[0]);
     }
 
-    return rows;
+    return { rows, skipped };
 }
 
 export async function deleteRooms(projectId, ids) {

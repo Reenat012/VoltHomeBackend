@@ -14,13 +14,17 @@ import { getProjectTree, getDelta, applyBatch } from "../services/projectsServic
 import { isUuidV4, requiredString, optionalString, isIsoDate, parseLimit } from "../utils/validation.js";
 // ❗ Если в models/devices.js реально есть эти экспорты — оставь, иначе УДАЛИ импорт, чтобы не сваливалась загрузка модуля
 // import { getDevicesByProject, getDevicesByNameCI, upsertDevices, deleteDevices } from "../models/devices.js";
-import { getActiveSubscriptionForUser } from "../models/subscriptions.js";
+import { resolvePlan, FREE_PROJECT_LIMIT } from "../services/planService.js";
 
 const router = express.Router();
 
-// Максимальное количество проектов для free-пользователя.
-// Можно переопределить через переменную окружения FREE_PROJECT_LIMIT.
-const FREE_PROJECT_LIMIT = Number(process.env.FREE_PROJECT_LIMIT || "3");
+// Максимум операций в одном пакете (docs/SYNC_CONTRACT.md, раздел 6).
+const MAX_BATCH_OPS = 500;
+
+function countBatchOps(ops) {
+    if (!ops || typeof ops !== "object") return 0;
+    return Object.values(ops).reduce((n, v) => n + (v?.upsert?.length || 0) + (v?.delete?.length || 0), 0);
+}
 
 // Все ручки требуют Bearer
 router.use(authMiddleware);
@@ -60,17 +64,10 @@ router.post("/", async (req, res) => {
         let plan = "free";
 
         try {
-            const sub = await getActiveSubscriptionForUser(uid);
-            if (
-                sub &&
-                ["ACTIVE", "TRIAL", "GRACE"].includes(sub.status) &&
-                (!sub.period_end_at || sub.period_end_at > new Date())
-            ) {
-                plan = "pro";
-            }
+            plan = (await resolvePlan(uid)).plan;
         } catch (subErr) {
             console.error(
-                "[POST /v1/projects] subscription check error:",
+                "[POST /v1/projects] plan check error:",
                 subErr?.message || subErr
             );
             plan = "free";
@@ -203,20 +200,17 @@ router.post("/:id/batch", async (req, res) => {
     if (!isUuidV4(id)) return res.status(400).json({ error: "invalid_id" });
 
     const { baseVersion, ops } = req.body || {};
+    if (countBatchOps(ops) > MAX_BATCH_OPS) {
+        return res.status(413).json({ error: "payload_too_large", message: `Не более ${MAX_BATCH_OPS} операций в пакете` });
+    }
     try {
         const result = await applyBatch({ userId: uid, projectId: id, baseVersion, ops });
+        if (result?.notFound) return res.status(404).json({ error: "not_found" });
 
         try {
-            const opsCount =
-                ops && typeof ops === "object"
-                    ? Object.values(ops).reduce(
-                        (n, v) => n + (v?.upsert?.length || 0) + (v?.delete?.length || 0),
-                        0
-                    )
-                    : 0;
             await req.app.locals?.audit?.(uid, "apply_batch", "projects", id, {
                 baseVersion,
-                opsCount,
+                opsCount: countBatchOps(ops),
             });
         } catch {}
 

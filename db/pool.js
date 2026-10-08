@@ -1,6 +1,7 @@
 // db/pool.js
 import "dotenv/config";
 import pg from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const { Pool } = pg;
 
@@ -16,6 +17,16 @@ const {
     PG_CONNECT_TIMEOUT_MS,
     PG_STATEMENT_TIMEOUT_MS,
 } = process.env;
+
+// Защита от катастрофы: тесты стирают схему, поэтому в режиме test разрешена только локальная БД.
+if (process.env.NODE_ENV === "test") {
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (!PGHOST || !localHosts.has(PGHOST)) {
+        throw new Error(
+            `Тесты разрешены только на локальной БД (PGHOST=localhost|127.0.0.1), получено: ${PGHOST || "<пусто>"}`
+        );
+    }
+}
 
 if (!PGHOST || !PGDATABASE || !PGUSER || !PGPASSWORD) {
     throw new Error("Database config is missing. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD in .env");
@@ -51,9 +62,14 @@ pool.on("connect", async (client) => {
 });
 
 // Единый helper: всегда используем pool.query (без manual connect/release)
+// Внутри withTransaction все вызовы query() идут через ОДНО соединение транзакции
+// (раньше модели ходили через пул отдельными соединениями, и откат не затрагивал их записи).
+const txStorage = new AsyncLocalStorage();
+
 export async function query(text, params) {
     try {
-        return await pool.query(text, params);
+        const runner = txStorage.getStore() ?? pool;
+        return await runner.query(text, params);
     } catch (err) {
         console.error("[db.query] error:", {
             message: err?.message,
@@ -71,10 +87,12 @@ export async function query(text, params) {
  * Все запросы внутри fn(client) выполняйте через client.query(...)
  */
 export async function withTransaction(fn) {
+    const existing = txStorage.getStore();
+    if (existing) return fn(existing); // уже внутри транзакции: вложенную не открываем
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
-        const res = await fn(client);
+        const res = await txStorage.run(client, () => fn(client));
         await client.query("COMMIT");
         return res;
     } catch (e) {

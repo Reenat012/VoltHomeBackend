@@ -1,0 +1,8 @@
+# HTTPS для API: Caddy сам получает и продлевает сертификат Let's Encrypt.
+# Нужно, чтобы запись api.volthome.ru в DNS указывала на этот сервер, а порты 80 и 443 были открыты.
+# Приложение слушает только 127.0.0.1:3000 (в .env: HOST=127.0.0.1), наружу его видит только Caddy.
+api.volthome.ru {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+    header -Server
+}

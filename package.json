@@ -3,13 +3,25 @@
   "version": "1.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node server/server.js",
     "start": "NODE_ENV=production node server/server.js",
     "migrate": "node db/migrate.js up",
     "migrate:down": "node db/migrate.js down",
-    "test": "NODE_ENV=test node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand"
+    "test": "NODE_ENV=test DOTENV_CONFIG_PATH=.env.test node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand",
+    "testdb:start": "sh scripts/test-db.sh start",
+    "testdb:stop": "sh scripts/test-db.sh stop",
+    "testdb:reset": "sh scripts/test-db.sh reset",
+    "testdb:psql": "sh scripts/test-db.sh psql",
+    "admin:find-user": "node scripts/admin.js find-user",
+    "admin:grant-pro": "node scripts/admin.js grant-pro",
+    "admin:revoke-pro": "node scripts/admin.js revoke-pro",
+    "admin:list-grants": "node scripts/admin.js list-grants",
+    "admin:doc-versions": "node scripts/admin.js doc-versions",
+    "admin:doc-restore": "node scripts/admin.js doc-restore"
   },
   "dependencies": {
     "cors": "^2.8.5",

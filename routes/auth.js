@@ -1,415 +1,164 @@
+// routes/auth.js
+// Вход и сессии. Контракт: docs/SYNC_CONTRACT.md, раздел 4.
+// Старые ручки /login, /refresh, /logout (с произвольным userId) удалены: клиентов, которые ими пользуются, нет.
 import express from "express";
-import jwt from "jsonwebtoken";
-import { authMiddleware } from "../utils/jwt.js";
+import {
+    authMiddleware,
+    signToken,
+    signRefreshToken,
+    verifyRefreshToken,
+    ACCESS_TTL_MIN,
+} from "../utils/jwt.js";
+import { ipBucket } from "../utils/rateLimit.js";
 import {
     createSession,
     getSessionByToken,
     rotateSession,
     markRevoked,
-    revokeAllForUser
+    revokeAllForUser,
 } from "../models/sessions.js";
-import { upsertUser, users } from "../stores/users.js";
-
-const router = express.Router();
-
-/**
- * Конфиг
- */
-const ACCESS_TTL_MIN = +(process.env.ACCESS_TTL_MIN || 30); // срок жизни access в минутах
-const JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "access_dev_secret";
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "refresh_dev_secret";
-
-/**
- * Утилиты
- */
-function issueAccessToken(uid) {
-    return jwt.sign({ uid }, JWT_ACCESS_SECRET, {
-        algorithm: "HS256",
-        expiresIn: `${ACCESS_TTL_MIN}m`,
-    });
-}
-
-function issueRefreshToken(uid) {
-    // exp внутри JWT — подстраховка; реальный TTL и ротация контролируются на уровне таблицы refresh_sessions
-    return jwt.sign({ uid, typ: "refresh" }, JWT_REFRESH_SECRET, {
-        algorithm: "HS256",
-        expiresIn: "90d",
-    });
-}
-
-function getReqMeta(req) {
-    const userAgent = req.get("User-Agent") || null;
-    const ip = (req.headers["x-forwarded-for"] || req.connection?.remoteAddress || req.ip || null);
-    return { userAgent, ip };
-}
+import { findOrCreateByIdentity } from "../models/users.js";
+import { createYandexClient, AuthError } from "../services/yandexAuth.js";
 
 function nowEpochSeconds() {
     return Math.floor(Date.now() / 1000);
 }
 
-/**
- * Единый ответ серверной сессии.
- *
- * Важно:
- * - добавили uid без ломания старого контракта;
- * - старые клиенты просто проигнорируют лишнее поле;
- * - новые клиенты смогут хранить owner identity для pending confirm recovery.
- */
+function getReqMeta(req) {
+    return { userAgent: req.get("User-Agent") || null, ip: req.ip || null };
+}
+
 function buildSessionResponse({ accessToken, refreshToken, uid }) {
     return {
         sessionJwt: accessToken,
-        expiresAtEpochSeconds: nowEpochSeconds() + ACCESS_TTL_MIN * 60, // секунды!
+        expiresAtEpochSeconds: nowEpochSeconds() + ACCESS_TTL_MIN * 60,
         refreshId: refreshToken,
         uid,
     };
 }
 
-/** Обёртка таймаута для промисов (быстрый отказ БД) */
-function withTimeout(promise, ms, onTimeoutMsg = "timeout") {
-    return new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(onTimeoutMsg)), ms);
-        promise.then(
-            (v) => { clearTimeout(t); resolve(v); },
-            (e) => { clearTimeout(t); reject(e); }
-        );
-    });
-}
-
-/** --- Яндекс профиль --- */
-function bestName(info) {
-    return info?.real_name || info?.display_name || info?.login || "Volt User";
-}
-
-function avatarUrlFrom(info, preset = "islands-200") {
-    const id = info?.default_avatar_id;
-    return id ? `https://avatars.yandex.net/get-yapic/${id}/${preset}` : null;
-}
-
-async function tryFetchYandexInfo(yaAccessToken) {
-    if (!yaAccessToken) return null;
-
-    try {
-        // Node 18+ имеет глобальный fetch
-        const resp = await fetch("https://login.yandex.ru/info?format=json", {
-            headers: { Authorization: `OAuth ${yaAccessToken}` }
-        });
-
-        if (!resp.ok) return null;
-
-        const json = await resp.json();
-        return {
-            displayName: bestName(json),
-            email: json?.default_email ?? null,
-            avatarUrl: avatarUrlFrom(json),
-        };
-    } catch {
-        return null;
+function sendError(res, err) {
+    if (err instanceof AuthError) {
+        return res.status(err.status).json({ error: err.code, message: err.message });
     }
+    console.error("[auth] error:", err?.message || err);
+    return res.status(503).json({ error: "server_unavailable" });
 }
 
 /**
- * ============================
- *  Ручки под контракт клиента
- * ============================
+ * @param {{ yandex?: object, rateLimitPerMin?: number }} deps
+ *   yandex: клиент Яндекса (в тестах подменяется), rateLimitPerMin: лимит запросов с одного IP.
  */
+export function createAuthRouter({
+    yandex = createYandexClient(),
+    rateLimitPerMin = Number(process.env.AUTH_RATE_LIMIT_PER_MIN || 30),
+} = {}) {
+    const router = express.Router();
+    const limiter = ipBucket({ limitPerMin: rateLimitPerMin, name: "auth" });
 
-/**
- * POST /v1/auth/yandex/exchange
- *
- * Принимает:
- *  - code или uid (как было)
- *  - опционально yaAccessToken (access_token Яндекса) — если пришёл, сервер сам запросит профиль
- *  - опционально profile { displayName, email, avatarUrl } — если клиент уже знает профиль
- *
- * Итог:
- *  - создаём refresh-сессию
- *  - сохраняем профиль в in-memory store `users`
- *  - возвращаем session + uid
- */
-router.post("/yandex/exchange", async (req, res) => {
-    const { code, uid, yaAccessToken, profile } = req.body || {};
-    if (!code && !uid) {
-        return res.status(400).json({ error: "uid_or_code_required" });
-    }
+    /**
+     * POST /v1/auth/yandex/exchange
+     * Веб: { code, redirectUri, codeVerifier?, platform }  Android: { yaAccessToken, platform }
+     * Поля uid и profile из тела запроса игнорируются.
+     */
+    router.post("/yandex/exchange", limiter, async (req, res) => {
+        const { code, redirectUri, codeVerifier, yaAccessToken } = req.body || {};
+        try {
+            const { externalId, profile } = await yandex.resolveIdentity({
+                code,
+                redirectUri,
+                codeVerifier,
+                yaAccessToken,
+            });
+            const { user } = await findOrCreateByIdentity({ provider: "yandex", externalId, profile });
 
-    // uid формируем как и прежде (совместимость текущей серверной логики)
-    const userId = uid || `ya_${String(code).slice(0, 24)}`;
-    const accessToken = issueAccessToken(userId);
-    const refreshToken = issueRefreshToken(userId);
+            const accessToken = signToken({ uid: user.uid });
+            const refreshToken = signRefreshToken(user.uid);
+            const { userAgent, ip } = getReqMeta(req);
+            await createSession({ userId: user.uid, refreshToken, userAgent, ip });
 
-    // Пишем refresh-сессию
-    try {
-        const { userAgent, ip } = getReqMeta(req);
-        await withTimeout(
-            createSession({ userId, refreshToken, userAgent, ip }),
-            2000,
-            "db_timeout"
-        );
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    // --- Сохранение профиля ---
-    // 1) Если клиент уже прислал profile — используем его
-    let resolvedProfile = (profile && typeof profile === "object")
-        ? {
-            displayName: String(profile.displayName || "").trim() || null,
-            email: profile.email ?? null,
-            avatarUrl: profile.avatarUrl ?? null,
+            return res.json(buildSessionResponse({ accessToken, refreshToken, uid: user.uid }));
+        } catch (err) {
+            return sendError(res, err);
         }
-        : null;
-
-    // 2) Иначе попробуем сами сходить в Яндекс по yaAccessToken
-    if (!resolvedProfile) {
-        const fetched = await tryFetchYandexInfo(yaAccessToken);
-        if (fetched) resolvedProfile = fetched;
-    }
-
-    // 3) Апсертим с минимальными дефолтами
-    upsertUser(userId, {
-        displayName: resolvedProfile?.displayName || "Volt User",
-        email: resolvedProfile?.email ?? null,
-        avatarUrl: resolvedProfile?.avatarUrl ?? null,
-        // План пока фиксируем "free"; если позже появится биллинг — обновим.
-        plan: users.get(userId)?.plan || "free",
-        planUntilEpochSeconds: users.get(userId)?.planUntilEpochSeconds ?? null,
     });
 
-    return res.json(
-        buildSessionResponse({
-            accessToken,
-            refreshToken,
-            uid: userId
-        })
-    );
-});
+    /**
+     * POST /v1/auth/session/refresh  { refreshId }
+     * Ротация: старый токен отзывается. Повторное использование уже отозванного (заменённого) токена
+     * означает возможную кражу, поэтому отзываются все сессии пользователя.
+     */
+    router.post("/session/refresh", limiter, async (req, res) => {
+        const { refreshId } = req.body || {};
+        if (!refreshId || typeof refreshId !== "string") {
+            return res.status(400).json({ error: "refresh_required" });
+        }
 
-/**
- * POST /v1/auth/session/refresh
- *
- * Новый клиент использует именно эту ручку.
- * Важно: uid возвращаем и здесь тоже, чтобы он не терялся после refresh.
- */
-router.post("/session/refresh", async (req, res) => {
-    const { refreshId } = req.body || {};
-    if (!refreshId) return res.status(400).json({ error: "refresh_required" });
+        try {
+            verifyRefreshToken(refreshId);
+        } catch {
+            return res.status(401).json({ error: "invalid_refresh" });
+        }
 
-    let decoded;
-    try {
-        decoded = jwt.verify(refreshId, JWT_REFRESH_SECRET);
-        if (decoded?.typ !== "refresh") throw new Error("wrong_type");
-    } catch {
-        return res.status(401).json({ error: "invalid_refresh" });
-    }
+        try {
+            const sess = await getSessionByToken(refreshId);
+            if (!sess) return res.status(401).json({ error: "invalid_refresh" });
 
-    let sess;
-    try {
-        sess = await withTimeout(getSessionByToken(refreshId), 2000, "db_timeout");
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
+            if (sess.revoked_at) {
+                if (sess.replaced_by) await revokeAllForUser(sess.user_id); // повторное использование
+                return res.status(401).json({ error: "revoked" });
+            }
+            if (new Date(sess.expires_at).getTime() < Date.now()) {
+                await markRevoked(sess.id);
+                return res.status(401).json({ error: "expired" });
+            }
 
-    if (!sess) return res.status(401).json({ error: "invalid_refresh" });
-    if (sess.revoked_at) return res.status(401).json({ error: "revoked" });
-
-    if (new Date(sess.expires_at).getTime() < Date.now()) {
-        await markRevoked(sess.id).catch(() => {});
-        return res.status(401).json({ error: "expired" });
-    }
-
-    const newRefreshToken = issueRefreshToken(sess.user_id);
-
-    try {
-        await withTimeout(
-            rotateSession({
+            const { userAgent, ip } = getReqMeta(req);
+            const newRefreshToken = signRefreshToken(sess.user_id);
+            const newId = await rotateSession({
                 oldSessionId: sess.id,
                 userId: sess.user_id,
-                newRefreshToken
-            }),
-            2000,
-            "db_timeout"
-        );
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
+                newRefreshToken,
+                userAgent,
+                ip,
+            });
+            if (!newId) {
+                // токен использовали одновременно или уже заменили
+                await revokeAllForUser(sess.user_id);
+                return res.status(401).json({ error: "revoked" });
+            }
 
-    const accessToken = issueAccessToken(sess.user_id);
-
-    return res.json(
-        buildSessionResponse({
-            accessToken,
-            refreshToken: newRefreshToken,
-            uid: sess.user_id
-        })
-    );
-});
-
-/** POST /v1/auth/session/logout */
-router.post("/session/logout", async (req, res) => {
-    const { refreshId } = req.body || {};
-    if (!refreshId) return res.status(400).json({ error: "refresh_required" });
-
-    try {
-        const sess = await withTimeout(getSessionByToken(refreshId), 2000, "db_timeout");
-        if (sess) await withTimeout(markRevoked(sess.id), 2000, "db_timeout");
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    return res.json({ ok: true });
-});
-
-/**
- * ============================
- *  Старые ручки (совместимость)
- * ============================
- */
-
-/**
- * Legacy login.
- * Здесь тоже возвращаем uid, чтобы поведение API было единым.
- */
-router.post("/login", async (req, res) => {
-    const { userId } = req.body || {};
-    if (!userId) return res.status(400).json({ error: "user_required" });
-
-    const accessToken = issueAccessToken(userId);
-    const refreshToken = issueRefreshToken(userId);
-
-    try {
-        const { userAgent, ip } = getReqMeta(req);
-        await withTimeout(
-            createSession({ userId, refreshToken, userAgent, ip }),
-            2000,
-            "db_timeout"
-        );
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    // Хотя бы дефолтный профиль, если его ещё нет
-    upsertUser(userId, {
-        displayName: "Volt User",
-        email: null,
-        avatarUrl: null
+            const accessToken = signToken({ uid: sess.user_id });
+            return res.json(buildSessionResponse({ accessToken, refreshToken: newRefreshToken, uid: sess.user_id }));
+        } catch (err) {
+            return sendError(res, err);
+        }
     });
 
-    return res.json(
-        buildSessionResponse({
-            accessToken,
-            refreshToken,
-            uid: userId
-        })
-    );
-});
+    /** POST /v1/auth/session/logout  { refreshId } */
+    router.post("/session/logout", limiter, async (req, res) => {
+        const { refreshId } = req.body || {};
+        if (!refreshId || typeof refreshId !== "string") {
+            return res.status(400).json({ error: "refresh_required" });
+        }
+        try {
+            const sess = await getSessionByToken(refreshId);
+            if (sess) await markRevoked(sess.id);
+            return res.json({ ok: true });
+        } catch (err) {
+            return sendError(res, err);
+        }
+    });
 
-/**
- * Legacy refresh.
- * Тоже возвращаем uid для полной совместимости нового клиента.
- */
-router.post("/refresh", async (req, res) => {
-    const { refreshToken } = req.body || {};
-    if (!refreshToken) return res.status(400).json({ error: "refresh_required" });
+    /** POST /v1/auth/logout_all  (с Bearer): выйти на всех устройствах */
+    router.post("/logout_all", authMiddleware, async (req, res) => {
+        try {
+            await revokeAllForUser(req.user.uid);
+            return res.json({ ok: true });
+        } catch (err) {
+            return sendError(res, err);
+        }
+    });
 
-    let decoded;
-    try {
-        decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
-        if (decoded?.typ !== "refresh") throw new Error("wrong_type");
-    } catch {
-        return res.status(401).json({ error: "invalid_refresh" });
-    }
-
-    let sess;
-    try {
-        sess = await withTimeout(getSessionByToken(refreshToken), 2000, "db_timeout");
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    if (!sess) return res.status(401).json({ error: "invalid_refresh" });
-    if (sess.revoked_at) return res.status(401).json({ error: "revoked" });
-
-    if (new Date(sess.expires_at).getTime() < Date.now()) {
-        await markRevoked(sess.id).catch(() => {});
-        return res.status(401).json({ error: "expired" });
-    }
-
-    const newRefreshToken = issueRefreshToken(sess.user_id);
-
-    try {
-        await withTimeout(
-            rotateSession({
-                oldSessionId: sess.id,
-                userId: sess.user_id,
-                newRefreshToken
-            }),
-            2000,
-            "db_timeout"
-        );
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    const accessToken = issueAccessToken(sess.user_id);
-
-    return res.json(
-        buildSessionResponse({
-            accessToken,
-            refreshToken: newRefreshToken,
-            uid: sess.user_id
-        })
-    );
-});
-
-router.post("/logout", async (req, res) => {
-    const { refreshToken } = req.body || {};
-    if (!refreshToken) return res.status(400).json({ error: "refresh_required" });
-
-    try {
-        const sess = await withTimeout(getSessionByToken(refreshToken), 2000, "db_timeout");
-        if (sess) await withTimeout(markRevoked(sess.id), 2000, "db_timeout");
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    return res.json({ ok: true });
-});
-
-router.post("/logout_all", authMiddleware, async (req, res) => {
-    try {
-        await withTimeout(revokeAllForUser(req.user.uid), 4000, "db_timeout");
-    } catch (e) {
-        return res.status(503).json({
-            error: "server_unavailable",
-            cause: String(e?.message || e)
-        });
-    }
-
-    return res.json({ ok: true });
-});
-
-export default router;
+    return router;
+}

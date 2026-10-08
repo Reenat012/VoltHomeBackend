@@ -3,114 +3,150 @@ name: Deploy to Timeweb
 on:
   push:
     branches: [ "main" ]
+  pull_request:
 
 jobs:
+  # Тесты на временной PostgreSQL. Без зелёных тестов выкладка не начинается.
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: volthome_test
+          POSTGRES_PASSWORD: volthome_test_local_only
+          POSTGRES_DB: volthome_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U volthome_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGDATABASE: volthome_test
+      PGUSER: volthome_test
+      PGPASSWORD: volthome_test_local_only
+      PGSSLMODE: disable
+      JWT_ACCESS_SECRET: test-access-secret-not-for-production
+      JWT_REFRESH_SECRET: test-refresh-secret-not-for-production
+      DISABLE_HTTPS_REDIRECT: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
   deploy:
+    needs: test
+    # Выкладываем только при push в main и только после зелёных тестов (не для pull request)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy over SSH (atomic releases)
+      # Архив собирается здесь, из проверенного коммита. Серверу доступ к GitHub не нужен.
+      - name: Pack release
+        run: git archive --format=tar.gz -o release.tgz HEAD
+
+      - name: Upload release to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}          # IP сервера
+          username: ${{ secrets.SERVER_USER }}      # deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}       # отдельный ключ только для выкладки, без пароля
+          port: 22
+          source: release.tgz
+          target: ${{ secrets.SERVER_PATH }}/incoming/   # /var/www/VoltHomeBackend/incoming/
+
+      - name: Install, migrate and switch release (atomic)
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.SERVER_HOST }}          # напр. 147.45.185.209
-          username: ${{ secrets.SERVER_USER }}      # напр. deploy
-          key: ${{ secrets.SSH_PRIVATE_KEY }}       # приватный ключ без пароля
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          envs: SERVER_PATH
           script_stop: true
           script: |
             set -euo pipefail
 
-            SERVER_PATH="${{ secrets.SERVER_PATH }}"   # напр. /var/www/VoltHomeBackend
+            SERVER_PATH="${{ secrets.SERVER_PATH }}"
             RELEASES_DIR="$SERVER_PATH/releases"
             CURRENT_LINK="$SERVER_PATH/current"
             TS="$(date +%Y%m%d%H%M%S)"
             RELEASE_DIR="$RELEASES_DIR/$TS"
 
-            echo "[1/8] prepare directories"
-            mkdir -p "$RELEASES_DIR"
-            cd "$SERVER_PATH"
-
-            echo "[2/8] fetch repo"
-            git fetch --all --prune
-
-            echo "[3/8] export clean tree to $RELEASE_DIR"
+            echo "[1/7] unpack release to $RELEASE_DIR"
             mkdir -p "$RELEASE_DIR"
-            # экспорт только отслеживаемых файлов (без .git, без старых node_modules)
-            git archive origin/main | tar -x -C "$RELEASE_DIR"
+            tar -xzf "$SERVER_PATH/incoming/release.tgz" -C "$RELEASE_DIR"
+            rm -f "$SERVER_PATH/incoming/release.tgz"
 
-            echo "[3.5/8] sync .env into new release (dotenv/config needs it)"
-            if [ -f "$SERVER_PATH/.env" ]; then
-              cp "$SERVER_PATH/.env" "$RELEASE_DIR/.env"
-              echo "  - .env copied into release"
-            else
-              echo "  ! WARNING: $SERVER_PATH/.env not found; app may fail DB check"
+            echo "[2/7] settings (.env) into the release"
+            if [ ! -f "$SERVER_PATH/.env" ]; then
+              echo "ERROR: $SERVER_PATH/.env not found. Fill it first (docs/DEPLOY.md)."
+              exit 1
             fi
+            cp "$SERVER_PATH/.env" "$RELEASE_DIR/.env"
+            chmod 600 "$RELEASE_DIR/.env"
 
-            echo "[4/8] install production deps (local npm cache)"
+            echo "[3/7] install production dependencies"
             cd "$RELEASE_DIR"
             export NODE_ENV=production
-            export npm_config_cache="$RELEASE_DIR/.npm-cache"
+            export npm_config_cache="$SERVER_PATH/.npm-cache"
             mkdir -p "$npm_config_cache"
             npm ci --omit=dev --no-audit --no-fund
 
-            echo "[5/8] symlink switch to new release"
+            echo "[4/7] database migrations (an error stops the deploy BEFORE switching)"
+            npm run migrate
+
+            echo "[5/7] switch to the new release"
+            PREVIOUS="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
             ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 
-            echo "[6/8] pm2 start/reload (stable)"
-            export PM2_HOME="/home/${{ secrets.SERVER_USER }}/.pm2"
-            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-
-            /usr/bin/pm2 -v || true
-            /usr/bin/node -v || true
-
-            # гарантируем живой демон
-            /usr/bin/pm2 ping >/dev/null 2>&1 || /usr/bin/pm2 resurrect >/dev/null 2>&1 || true
-
-            if /usr/bin/pm2 describe volthome-api >/dev/null 2>&1; then
-              /usr/bin/pm2 reload volthome-api --update-env
+            echo "[6/7] pm2 start or reload"
+            export PM2_HOME="$HOME/.pm2"
+            if pm2 describe volthome-api >/dev/null 2>&1; then
+              pm2 reload volthome-api --update-env
             else
-              /usr/bin/pm2 start "$CURRENT_LINK/server/server.js" \
-                --name volthome-api \
-                --cwd "$CURRENT_LINK" \
-                --time
+              pm2 start "$CURRENT_LINK/server/server.js" --name volthome-api --cwd "$CURRENT_LINK" --time
             fi
-            /usr/bin/pm2 save || true
-            /usr/bin/pm2 ls || true
+            pm2 save || true
 
-            echo "[7/8] healthcheck + diagnostics + keep 5 releases"
-            # быстрые проверки слушающего порта (диагностика)
-            (ss -tulpn 2>/dev/null | grep ':3000' || true)
-
-            # healthcheck (30 попыток по 1с)
+            echo "[7/7] healthcheck (30 tries); roll back to the previous release on failure"
+            healthy=0
             for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:3000/health >/dev/null; then
-                echo "health OK on try $i ✅"
-                break
-              fi
-              echo "waiting app to become healthy... ($i/30)"
-              sleep 1
+              if curl -fsS http://127.0.0.1:3000/health >/dev/null; then healthy=1; echo "health OK on try $i"; break; fi
+              echo "waiting for the app... ($i/30)"; sleep 1
             done
-
-            if ! curl -fsS http://127.0.0.1:3000/health >/dev/null; then
-              echo "healthcheck failed, printing pm2 + app logs ⬇️"
-              /usr/bin/pm2 ls || true
-              # вывести именно логи приложения
-              tail -n 200 "/home/${{ secrets.SERVER_USER }}/.pm2/logs/volthome-api-error.log" 2>/dev/null || true
-              tail -n 200 "/home/${{ secrets.SERVER_USER }}/.pm2/logs/volthome-api-out.log"   2>/dev/null || true
-              # жёсткий перезапуск (fallback)
-              /usr/bin/pm2 delete volthome-api || true
-              /usr/bin/pm2 start "$CURRENT_LINK/server/server.js" --name volthome-api --cwd "$CURRENT_LINK" --time
-              /usr/bin/pm2 save || true
-              # повторная проверка
-              sleep 2
-              curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1
+            if [ "$healthy" -ne 1 ]; then
+              echo "healthcheck FAILED. pm2 and app logs:"
+              pm2 ls || true
+              tail -n 100 "$HOME/.pm2/logs/volthome-api-error.log" 2>/dev/null || true
+              if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
+                echo "rolling back to $PREVIOUS"
+                ln -sfn "$PREVIOUS" "$CURRENT_LINK"
+                pm2 reload volthome-api --update-env || true
+              fi
+              exit 1
             fi
 
-            # оставить только 5 последних релизов
+            # keep the 5 latest releases
             ls -1dt "$RELEASES_DIR"/* 2>/dev/null | tail -n +6 | xargs -r rm -rf
-
-            echo "✅ deploy finished: $RELEASE_DIR"
