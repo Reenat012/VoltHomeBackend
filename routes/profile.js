@@ -41,14 +41,14 @@ router.get("/me", authMiddleware, async (req, res) => {
 });
 
 /**
- * PUT и POST /v1/profile/me: обновить displayName, email, avatarUrl.
+ * PUT и POST /v1/profile/me: обновить displayName и email (avatarUrl принимается и игнорируется: аватар не храним).
  * Поля плана игнорируются: клиент не может выдать себе PRO.
  */
 async function saveProfile(req, res) {
     const uid = req.user.uid;
-    const { displayName, email, avatarUrl } = req.body || {};
+    const { displayName, email } = req.body || {};
     try {
-        const saved = await updateProfile(uid, { displayName, email, avatarUrl });
+        const saved = await updateProfile(uid, { displayName, email });
         if (!saved) return res.status(404).json({ error: "not_found" });
         return res.json({
             ok: true,

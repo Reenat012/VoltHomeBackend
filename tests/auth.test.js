@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { makeApp, fakeYandex, closeDb, truncateAll } from "./helpers.js";
 import { createYandexClient } from "../services/yandexAuth.js";
 import { resetRateLimits } from "../utils/rateLimit.js";
+import { query } from "../db/pool.js";
 
 const yandex = fakeYandex({
     "token-anna": { externalId: "1001", profile: { displayName: "Анна", email: "anna@example.com" } },
@@ -124,6 +125,45 @@ describe("Вход по коду (веб) с настоящим клиентом
         expect(tokenCall.init.body.get("code_verifier")).toBe("ver");
         const infoCall = calls.find((c) => c.url.includes("login.yandex.ru/info"));
         expect(infoCall.init.headers.Authorization).toBe("OAuth ya-token");
+    });
+
+    test("аватар из профиля Яндекса не сохраняется (в Политике его нет), клиент не может его записать", async () => {
+        const withAvatar = async (url) =>
+            String(url).includes("oauth.yandex.ru/token")
+                ? { ok: true, status: 200, json: async () => ({ access_token: "ya-token" }) }
+                : {
+                      ok: true,
+                      status: 200,
+                      json: async () => ({
+                          id: "888",
+                          real_name: "Глеб",
+                          default_email: "gleb@example.com",
+                          default_avatar_id: "abc123",
+                      }),
+                  };
+        const web = await makeApp({
+            yandex: createYandexClient({ fetchImpl: withAvatar, env }),
+            rateLimitPerMin: 1000,
+        });
+        const res = await exchange(
+            { code: "abc", redirectUri: "https://volthome.ru/auth/callback.html", platform: "web" },
+            web
+        ).expect(200);
+        const bearer = { Authorization: `Bearer ${res.body.sessionJwt}` };
+
+        const stored = await query(`SELECT avatar_url FROM users WHERE uid = $1`, [res.body.uid]);
+        expect(stored.rows[0].avatar_url).toBeNull();
+        expect((await request(web).get("/v1/profile/me").set(bearer).expect(200)).body.avatarUrl).toBeNull();
+
+        const put = await request(web)
+            .put("/v1/profile/me")
+            .set(bearer)
+            .send({ displayName: "Глеб Н.", avatarUrl: "https://tracker.example/pixel.png" })
+            .expect(200);
+        expect(put.body.profile.avatarUrl).toBeNull();
+        expect(put.body.profile.displayName).toBe("Глеб Н.");
+        const again = await query(`SELECT avatar_url FROM users WHERE uid = $1`, [res.body.uid]);
+        expect(again.rows[0].avatar_url).toBeNull();
     });
 
     test("чужой адрес возврата отклоняется: 400", async () => {

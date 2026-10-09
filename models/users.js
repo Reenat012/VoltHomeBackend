@@ -15,6 +15,8 @@ function clean(v) {
     return s === "" ? null : s;
 }
 
+// Аватар не сохраняем: его нет в перечне обрабатываемых данных (Политика, Согласие). Колонка avatar_url осталась
+// ради совместимости схемы и ответов API (поле avatarUrl всегда null), миграция 032 очистила прежние значения.
 /**
  * Находит пользователя по способу входа или создаёт нового.
  * Профиль обновляется только непустыми значениями (пустое не затирает сохранённое).
@@ -22,7 +24,6 @@ function clean(v) {
 export async function findOrCreateByIdentity({ provider, externalId, profile = {} }) {
     const displayName = clean(profile.displayName);
     const email = clean(profile.email);
-    const avatarUrl = clean(profile.avatarUrl);
 
     return withTransaction(async (client) => {
         const found = await client.query(
@@ -34,19 +35,18 @@ export async function findOrCreateByIdentity({ provider, externalId, profile = {
                 `UPDATE users SET
                     display_name = COALESCE($2, display_name),
                     email        = COALESCE($3, email),
-                    avatar_url   = COALESCE($4, avatar_url),
                     updated_at   = now()
                  WHERE uid = $1
                  RETURNING ${COLUMNS}`,
-                [found.rows[0].uid, displayName, email, avatarUrl]
+                [found.rows[0].uid, displayName, email]
             );
             return { user: upd.rows[0], created: false };
         }
 
         const uid = newUid();
         await client.query(
-            `INSERT INTO users (uid, display_name, email, avatar_url) VALUES ($1, $2, $3, $4)`,
-            [uid, displayName, email, avatarUrl]
+            `INSERT INTO users (uid, display_name, email) VALUES ($1, $2, $3)`,
+            [uid, displayName, email]
         );
         const ins = await client.query(
             `INSERT INTO identities (provider, external_id, uid) VALUES ($1, $2, $3)
@@ -73,16 +73,15 @@ export async function getUser(uid) {
     return res.rows[0] || null;
 }
 
-export async function updateProfile(uid, { displayName, email, avatarUrl }) {
+export async function updateProfile(uid, { displayName, email }) {
     const res = await query(
         `UPDATE users SET
             display_name = COALESCE($2, display_name),
             email        = COALESCE($3, email),
-            avatar_url   = COALESCE($4, avatar_url),
             updated_at   = now()
          WHERE uid = $1
          RETURNING ${COLUMNS}`,
-        [uid, clean(displayName), clean(email), clean(avatarUrl)]
+        [uid, clean(displayName), clean(email)]
     );
     return res.rows[0] || null;
 }
