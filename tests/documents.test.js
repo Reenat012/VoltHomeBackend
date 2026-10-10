@@ -266,6 +266,88 @@ describe("Доступ: чужие проекты и вход", () => {
     });
 });
 
+describe("Готовая схема щита panel_scheme", () => {
+    let uid, pid;
+    const scheme = (over = {}) => ({
+        schemaVersion: 1,
+        baseFingerprint: "abc123",
+        generatedAt: "2026-10-12T10:00:00Z",
+        scene: { format: "volthome-scheme", version: 1, width: 100, height: 50, elements: [] },
+        ...over,
+    });
+    beforeEach(async () => {
+        uid = await makeUser("1", true);
+        pid = (await newProject(uid)).id;
+    });
+
+    test("запись, чтение, обновление по версии, удаление", async () => {
+        const w1 = await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data: scheme() }).expect(200);
+        expect(w1.body.version).toBe(1);
+        const r = await get(uid, pid, "panel_scheme").expect(200);
+        expect(r.body).toMatchObject({ kind: "panel_scheme", version: 1, schemaVersion: 1 });
+        expect(r.body.data.scene.format).toBe("volthome-scheme");
+        const w2 = await put(uid, pid, "panel_scheme", {
+            baseVersion: 1,
+            schemaVersion: 1,
+            data: scheme({ baseFingerprint: "zzz" }),
+        }).expect(200);
+        expect(w2.body.version).toBe(2);
+        await put(uid, pid, "panel_scheme", { baseVersion: 1, schemaVersion: 1, data: scheme() }).expect(409);
+        await del(uid, pid, "panel_scheme").expect(200);
+        await get(uid, pid, "panel_scheme").expect(404);
+    });
+
+    test("в списке документов виден вместе с другими видами, не мешает panel_layout", async () => {
+        await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data: scheme() }).expect(200);
+        await put(uid, pid, "panel_layout", { baseVersion: 0, schemaVersion: 3, data: panel() }).expect(200);
+        const res = await list(uid, pid).expect(200);
+        expect(res.body.items.map((i) => i.kind).sort()).toEqual(["panel_layout", "panel_scheme"]);
+    });
+
+    test.each([
+        ["нет schemaVersion в data", scheme({ schemaVersion: undefined })],
+        ["schemaVersion в data не совпадает с запросом", scheme({ schemaVersion: 2 })],
+        ["нет сцены", scheme({ scene: undefined })],
+        ["сцена не объект", scheme({ scene: [1] })],
+        ["сцена строкой", scheme({ scene: "x" })],
+        ["baseFingerprint не строка", scheme({ baseFingerprint: 5 })],
+        ["baseFingerprint слишком длинный", scheme({ baseFingerprint: "x".repeat(201) })],
+        ["generatedAt не строка", scheme({ generatedAt: {} })],
+    ])("422 invalid_document: %s", async (_name, data) => {
+        const res = await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data }).expect(422);
+        expect(res.body.error).toBe("invalid_document");
+    });
+
+    test("новая версия схемы в приложении не затирается старой (409 schema_downgrade)", async () => {
+        await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 2, data: scheme({ schemaVersion: 2 }) }).expect(200);
+        const res = await put(uid, pid, "panel_scheme", { baseVersion: 1, schemaVersion: 1, data: scheme() }).expect(409);
+        expect(res.body.error).toBe("schema_downgrade");
+    });
+
+    test("без PRO чужой схемы не прочитать, и данные чужого проекта недоступны", async () => {
+        await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data: scheme() }).expect(200);
+        const other = await makeUser("2", true);
+        await get(other, pid, "panel_scheme").expect(404);
+        await put(other, pid, "panel_scheme", { baseVersion: 1, schemaVersion: 1, data: scheme() }).expect(404);
+    });
+
+    test("PRO закончился: данные сохранены, список показывает locked, чтение 402; вернулся PRO: снова доступно", async () => {
+        await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data: scheme() }).expect(200);
+        await revokePro({ uid });
+        const items = (await list(uid, pid).expect(200)).body.items;
+        expect(items).toEqual([expect.objectContaining({ kind: "panel_scheme", locked: true })]);
+        await get(uid, pid, "panel_scheme").expect(402);
+        await grantPro({ uid });
+        expect((await get(uid, pid, "panel_scheme").expect(200)).body.data.baseFingerprint).toBe("abc123");
+    });
+
+    test("крупная сцена (около 1,5 МБ) принимается, свыше 2 МБ отклоняется (413)", async () => {
+        const big = (n) => scheme({ scene: { format: "volthome-scheme", version: 1, pad: "x".repeat(n) } });
+        await put(uid, pid, "panel_scheme", { baseVersion: 0, schemaVersion: 1, data: big(1_500_000) }).expect(200);
+        await put(uid, pid, "panel_scheme", { baseVersion: 1, schemaVersion: 1, data: big(2_200_000) }).expect(413);
+    });
+});
+
 describe("PRO на сервере", () => {
     const gated = [
         ["cable_defaults", "cableLineCalculation"],
@@ -273,6 +355,7 @@ describe("PRO на сервере", () => {
         ["apparatus_selections", "projectEstimate"],
         ["estimate_items", "projectEstimate"],
         ["panel_layout", "panelVisualization"],
+        ["panel_scheme", "panelVisualization"],
     ];
 
     test.each(gated)("бесплатный пользователь: %s даёт 402 с правом %s на чтение и запись", async (kind, feature) => {
