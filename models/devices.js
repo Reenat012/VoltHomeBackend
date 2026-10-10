@@ -189,7 +189,7 @@ export async function deleteDevices(projectId, ids) {
 /** Дельта устройств (updated_at >= since) */
 export async function deltaDevices(projectId, sinceIso) {
     const res = await query(
-        `SELECT id, project_id, group_id, name, meta, updated_at, is_deleted
+        `SELECT id, project_id, group_id, name, meta, updated_at, client_updated_at, is_deleted
          FROM public.devices
          WHERE project_id = $1
            AND updated_at >= $2
@@ -202,7 +202,7 @@ export async function deltaDevices(projectId, sinceIso) {
 /** Живые устройства проекта (только по «живым» группам и комнатам) */
 export async function getDevicesByProject(projectId) {
     const res = await query(
-        `SELECT d.id, d.project_id, d.group_id, d.name, d.meta, d.updated_at, d.is_deleted
+        `SELECT d.id, d.project_id, d.group_id, d.name, d.meta, d.updated_at, d.client_updated_at, d.is_deleted
          FROM public.devices d
                   JOIN public."groups" g ON g.id = d.group_id AND g.is_deleted = FALSE
                   JOIN public.rooms r    ON r.id = g.room_id AND r.is_deleted = FALSE

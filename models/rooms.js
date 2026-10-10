@@ -117,7 +117,7 @@ export async function deleteRooms(projectId, ids) {
  */
 export async function deltaRooms(projectId, sinceIso) {
     const res = await query(
-        `SELECT id, project_id, name, meta, updated_at, is_deleted
+        `SELECT id, project_id, name, meta, updated_at, client_updated_at, is_deleted
          FROM rooms
          WHERE project_id = $1
            AND updated_at >= $2
@@ -129,7 +129,7 @@ export async function deltaRooms(projectId, sinceIso) {
 
 export async function getRoomsByProject(projectId) {
     const res = await query(
-        `SELECT id, name, meta, updated_at, is_deleted
+        `SELECT id, name, meta, updated_at, client_updated_at, is_deleted
          FROM rooms
          WHERE project_id = $1
            AND is_deleted = FALSE`,
