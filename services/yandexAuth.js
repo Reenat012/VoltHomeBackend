@@ -19,11 +19,6 @@ function bestName(info) {
     return info?.real_name || info?.display_name || info?.login || null;
 }
 
-function avatarUrlFrom(info) {
-    const id = info?.default_avatar_id;
-    return id ? `https://avatars.yandex.net/get-yapic/${id}/islands-200` : null;
-}
-
 async function request(fetchImpl, url, init) {
     try {
         return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -83,7 +78,7 @@ export function createYandexClient({ fetchImpl = globalThis.fetch, env = process
 
     /**
      * По коду (веб) или токену (Android) возвращает идентификатор у Яндекса и профиль.
-     * @returns {{ externalId: string, profile: { displayName, email, avatarUrl } }}
+     * @returns {{ externalId: string, profile: { displayName, email } }}
      */
     async function resolveIdentity({ code, redirectUri, codeVerifier, yaAccessToken }) {
         let token = null;
@@ -97,7 +92,6 @@ export function createYandexClient({ fetchImpl = globalThis.fetch, env = process
             profile: {
                 displayName: bestName(info),
                 email: info.default_email ?? null,
-                avatarUrl: avatarUrlFrom(info),
             },
         };
     }

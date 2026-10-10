@@ -88,6 +88,16 @@ PY
 if id deploy >/dev/null 2>&1; then chown deploy:deploy "$ENV_FILE"; fi
 chmod 600 "$ENV_FILE"
 
+# Работающее приложение читает свою копию .env из каталога релиза (её кладёт выкладка): обновляем и её, затем перезапуск
+APP_DIR="$(dirname "$ENV_FILE")"
+if [ -L "$APP_DIR/current" ]; then
+  install -m 600 -o deploy -g deploy "$ENV_FILE" "$(readlink -f "$APP_DIR/current")/.env"
+  if su - deploy -c 'pm2 describe volthome-api >/dev/null 2>&1'; then
+    su - deploy -c 'pm2 reload volthome-api --update-env >/dev/null && pm2 save >/dev/null'
+    echo "Приложение перезапущено."
+  fi
+fi
+
 if ! command -v psql >/dev/null 2>&1; then
   echo "Устанавливаю psql (клиент PostgreSQL) для проверки подключения..."
   DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client >/dev/null
