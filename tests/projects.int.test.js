@@ -154,6 +154,38 @@ describe("Пакет изменений (batch) и дельта", () => {
         expect(tree.body.groups.some((g) => g.room_id === roomId && g.name === "__default__")).toBe(true);
     });
 
+    test("снимок и дельта отдают clientUpdatedAt записей (время правки на устройстве)", async () => {
+        const p = await createProject();
+        const roomId = randomUUID();
+        const deviceId = randomUUID();
+        const stamp = "2026-10-10T08:15:00.000Z";
+        await request(app)
+            .post(`/v1/projects/${p.id}/batch`)
+            .set(authHeader())
+            .send({
+                baseVersion: 1,
+                ops: {
+                    rooms: { upsert: [{ id: roomId, name: "Кухня", meta: { room_type: "KITCHEN" }, clientUpdatedAt: stamp }], delete: [] },
+                    devices: {
+                        upsert: [
+                            { id: deviceId, name: "Чайник", meta: { room_id: roomId, power: 2000 }, clientUpdatedAt: stamp },
+                        ],
+                        delete: [],
+                    },
+                },
+            })
+            .expect(200);
+        const tree = await request(app).get(`/v1/projects/${p.id}`).set(authHeader()).expect(200);
+        expect(new Date(tree.body.rooms[0].client_updated_at).toISOString()).toBe(stamp);
+        expect(new Date(tree.body.devices[0].client_updated_at).toISOString()).toBe(stamp);
+        const delta = await request(app)
+            .get(`/v1/projects/${p.id}/delta?since=1970-01-01T00:00:00Z`)
+            .set(authHeader())
+            .expect(200);
+        expect(new Date(delta.body.rooms.upsert[0].client_updated_at).toISOString()).toBe(stamp);
+        expect(new Date(delta.body.devices.upsert[0].client_updated_at).toISOString()).toBe(stamp);
+    });
+
     test("прибор без группы и без room_id отвечает 400 GROUP_UNRESOLVED", async () => {
         const p = await createProject();
         const res = await request(app)
