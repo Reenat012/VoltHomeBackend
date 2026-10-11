@@ -10,6 +10,7 @@ export const DOCUMENT_KINDS = {
     apparatus_selections: "projectEstimate",
     estimate_items: "projectEstimate",
     panel_layout: "panelVisualization",
+    panel_scheme: "panelVisualization",
 };
 
 /** Сколько последних версий каждого документа хранится для отката. */

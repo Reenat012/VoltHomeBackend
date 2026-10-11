@@ -54,6 +54,29 @@ function checkKind(req) {
     return kind;
 }
 
+/**
+ * Готовая монтажная схема щита: Android кладёт сюда сцену `PanelScheme` (формат `volthome-scheme`),
+ * сайт её только рисует. Сервер проверяет оболочку, содержимое сцены не интерпретирует
+ * (docs/SYNC_CONTRACT.md, раздел 7).
+ */
+function checkPanelScheme(data, schemaVersion) {
+    if (!Number.isInteger(data.schemaVersion)) {
+        throw httpError(422, "invalid_document", "В data схемы нужно целое поле schemaVersion");
+    }
+    if (data.schemaVersion !== schemaVersion) {
+        throw httpError(422, "invalid_document", "schemaVersion в data и в запросе должны совпадать");
+    }
+    if (!isPlainObject(data.scene)) {
+        throw httpError(422, "invalid_document", "В data схемы нужна сцена scene (объект JSON)");
+    }
+    if (data.baseFingerprint !== undefined && (typeof data.baseFingerprint !== "string" || data.baseFingerprint.length > 200)) {
+        throw httpError(422, "invalid_document", "baseFingerprint: строка не длиннее 200 символов");
+    }
+    if (data.generatedAt !== undefined && (typeof data.generatedAt !== "string" || data.generatedAt.length > 64)) {
+        throw httpError(422, "invalid_document", "generatedAt: строка не длиннее 64 символов");
+    }
+}
+
 const wrap = (fn) => (req, res, next) => fn(req, res).catch(next);
 
 const present = (row) => ({
@@ -116,6 +139,7 @@ router.put(
                 throw httpError(422, "invalid_document", "schemaVersion в data и в запросе должны совпадать");
             }
         }
+        if (kind === "panel_scheme") checkPanelScheme(data, schemaVersion);
         const row = await putDocument({
             projectId: req.projectId,
             kind,
