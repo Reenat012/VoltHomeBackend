@@ -13,21 +13,11 @@ import {
 } from "../models/subscriptions.js";
 
 const {
-    // Флаги rollout
-    BILLING_REAL_VERIFY_ENABLED = "false",
-    BILLING_STRICT_CONFIRM_VALIDATION_ENABLED = "false",
-
-    // Старый fallback оставляем только как аварийную совместимость
-    RUSTORE_VERIFY_STUB = "true",
-
     // Параметры RuStore API
     RUSTORE_KEY_ID,
     RUSTORE_PRIVATE_KEY,
     RUSTORE_CONSOLE_APP_ID,
     RUSTORE_PACKAGE_NAME = "ru.mugalimov.volthome",
-
-    // Sandbox-флаг
-    RUSTORE_USE_SANDBOX = "false",
 } = process.env;
 
 const RUSTORE_PUBLIC_API_BASE = "https://public-api.rustore.ru";
@@ -71,20 +61,27 @@ function logService(level, marker, operation, billingTraceId, outcome, extra) {
     }
 }
 
+// Переменные читаются в момент вызова (а не при загрузке модуля): так поведение проверяется тестами,
+// и значение нельзя «зафиксировать» случайным порядком импортов.
 function isRealVerifyEnabled() {
-    return BILLING_REAL_VERIFY_ENABLED === "true";
+    return process.env.BILLING_REAL_VERIFY_ENABLED === "true";
 }
 
 function isStrictConfirmValidationEnabled() {
-    return BILLING_STRICT_CONFIRM_VALIDATION_ENABLED === "true";
+    return process.env.BILLING_STRICT_CONFIRM_VALIDATION_ENABLED === "true";
 }
 
 function isSandboxMode() {
-    return RUSTORE_USE_SANDBOX === "true";
+    return process.env.RUSTORE_USE_SANDBOX === "true";
 }
 
-function isStubMode() {
-    return RUSTORE_VERIFY_STUB === "true";
+/**
+ * Заглушка подтверждения покупки выдаёт PRO на 30 дней по любому токену: без неё локальная разработка
+ * не работает, но в production она должна быть невозможна ни при каких переменных окружения. Раньше она
+ * включалась по умолчанию и действовала на боевом сервере (подтвердить «покупку» мог любой вошедший).
+ */
+export function isStubMode() {
+    return process.env.RUSTORE_VERIFY_STUB === "true" && process.env.NODE_ENV !== "production";
 }
 
 /**
@@ -430,10 +427,10 @@ export async function verifyRustorePurchase({
         billingTraceId,
         null,
         [
-            `realVerify=${BILLING_REAL_VERIFY_ENABLED}`,
-            `strictValidation=${BILLING_STRICT_CONFIRM_VALIDATION_ENABLED}`,
-            `stubMode=${RUSTORE_VERIFY_STUB}`,
-            `sandboxMode=${RUSTORE_USE_SANDBOX}`,
+            `realVerify=${isRealVerifyEnabled()}`,
+            `strictValidation=${isStrictConfirmValidationEnabled()}`,
+            `stubMode=${isStubMode()}`,
+            `sandboxMode=${isSandboxMode()}`,
             `userId=${maskValue(userId)}`,
             `productId=${maskValue(productId)}`,
             `orderId=${maskValue(orderId)}`,
