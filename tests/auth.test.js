@@ -104,7 +104,7 @@ describe("Вход по коду (веб) с настоящим клиентом
             if (String(url).includes("oauth.yandex.ru/token")) {
                 return { ok: true, status: 200, json: async () => ({ access_token: "ya-token" }) };
             }
-            return { ok: true, status: 200, json: async () => ({ id: "777", real_name: "Вера", default_email: "vera@example.com" }) };
+            return { ok: true, status: 200, json: async () => ({ id: "777", client_id: "client-id-123", real_name: "Вера", default_email: "vera@example.com" }) };
         };
     }
 
@@ -136,6 +136,7 @@ describe("Вход по коду (веб) с настоящим клиентом
                       status: 200,
                       json: async () => ({
                           id: "888",
+                          client_id: "client-id-123",
                           real_name: "Глеб",
                           default_email: "gleb@example.com",
                           default_avatar_id: "abc123",
@@ -196,6 +197,36 @@ describe("Вход по коду (веб) с настоящим клиентом
         });
         const res = await exchange({ code: "bad", redirectUri: "https://volthome.ru/auth/callback.html" }, web).expect(401);
         expect(res.body.error).toBe("invalid_code");
+    });
+
+    const infoWith = (clientId) => async (url) =>
+        String(url).includes("oauth.yandex.ru/token")
+            ? { ok: true, status: 200, json: async () => ({ access_token: "ya-token" }) }
+            : { ok: true, status: 200, json: async () => ({ id: "999", real_name: "Чужой", ...clientId }) };
+
+    test.each([
+        ["чужое приложение", { client_id: "other-app" }],
+        ["client_id не вернулся", {}],
+    ])("токен не нашего приложения (%s): 401, сессии нет", async (_name, clientId) => {
+        const web = await makeApp({
+            yandex: createYandexClient({ fetchImpl: infoWith(clientId), env }),
+            rateLimitPerMin: 1000,
+        });
+        // путь Android: токен приходит готовым
+        const a = await exchange({ yaAccessToken: "foreign-token" }, web).expect(401);
+        expect(a.body.error).toBe("invalid_yandex_token");
+        expect(a.body.sessionJwt).toBeUndefined();
+        // путь веба: код меняется на токен
+        const w = await exchange({ code: "abc", redirectUri: "https://volthome.ru/auth/callback.html" }, web).expect(401);
+        expect(w.body.error).toBe("invalid_yandex_token");
+    });
+
+    test("токен нашего приложения принимается и по yaAccessToken (Android)", async () => {
+        const web = await makeApp({
+            yandex: createYandexClient({ fetchImpl: infoWith({ client_id: "client-id-123" }), env }),
+            rateLimitPerMin: 1000,
+        });
+        await exchange({ yaAccessToken: "own-token" }, web).expect(200);
     });
 
     test("только uid при настоящем клиенте: до Яндекса даже не доходит", async () => {

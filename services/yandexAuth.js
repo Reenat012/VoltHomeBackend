@@ -73,6 +73,12 @@ export function createYandexClient({ fetchImpl = globalThis.fetch, env = process
         if (!res.ok) throw new AuthError(401, "invalid_yandex_token", "Токен Яндекса не принят");
         const info = await res.json().catch(() => null);
         if (!info?.id) throw new AuthError(401, "invalid_yandex_token", "Яндекс не вернул пользователя");
+        // Токен должен быть выдан нашему приложению: иначе подойдёт токен любого стороннего
+        // сервиса «Войти через Яндекс», который пользователь где-то уже отдал.
+        const ownClientId = env.YANDEX_CLIENT_ID;
+        if (ownClientId && String(info.client_id ?? "") !== ownClientId) {
+            throw new AuthError(401, "invalid_yandex_token", "Токен выдан другому приложению");
+        }
         return info;
     }
 
